@@ -33,7 +33,13 @@ const PROVIDER_CATALOG: Record<CanonicalLlmProvider, ProviderCatalogEntry> = {
     defaultModel: 'gpt-5.4',
     displayName: 'OpenAI',
     docsUrl: 'https://developers.openai.com/api/docs/models',
-    exampleModels: ['gpt-5.4', 'gpt-5-mini', 'gpt-4.1'],
+    exampleModels: [
+      'gpt-5.4',
+      'gpt-5-mini',
+      'gpt-5.4-nano',
+      'gpt-5.4-mini',
+      'gpt-4.1',
+    ],
   },
   gemini: {
     aliases: ['google'],

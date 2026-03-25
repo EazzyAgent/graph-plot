@@ -4,6 +4,10 @@ import request from 'supertest';
 import { App } from 'supertest/types';
 import { configureApp } from './../src/app/app.config';
 import { AppModule } from './../src/app/app.module';
+import type {
+  ExecCapabilitiesResponse,
+  ExecRunResponse,
+} from './../src/exec/exec.types';
 import type { LlmProviderInfo } from './../src/llm/llm.types';
 import type {
   ApiEchoResponse,
@@ -66,6 +70,49 @@ describe('AppController (e2e)', () => {
             expect.objectContaining({ provider: 'anthropic' }),
           ]),
         );
+      });
+  });
+
+  it('/api/exec/capabilities (GET)', () => {
+    return request(app.getHttpServer())
+      .get('/api/exec/capabilities')
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as ExecCapabilitiesResponse;
+
+        expect(body.os).toBe(process.platform);
+        expect(Array.isArray(body.runtimes)).toBe(true);
+        expect(body.runtimes).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ runtime: 'python' }),
+            expect.objectContaining({ runtime: 'bash' }),
+            expect.objectContaining({ runtime: 'powershell' }),
+            expect.objectContaining({ runtime: 'shell' }),
+          ]),
+        );
+      });
+  });
+
+  it('/api/exec/run (POST)', () => {
+    const code =
+      process.platform === 'win32'
+        ? 'Write-Output "exec ok"'
+        : 'echo "exec ok"';
+
+    return request(app.getHttpServer())
+      .post('/api/exec/run')
+      .send({
+        runtime: 'shell',
+        code,
+      })
+      .expect(201)
+      .expect((response) => {
+        const body = response.body as ExecRunResponse;
+
+        expect(body.status).toBe('completed');
+        expect(body.stdout).toContain('exec ok');
+        expect(body.requestedRuntime).toBe('shell');
+        expect(Array.isArray(body.logs)).toBe(true);
       });
   });
 });

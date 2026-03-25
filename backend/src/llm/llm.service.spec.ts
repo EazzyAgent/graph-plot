@@ -25,23 +25,38 @@ describe('LlmService', () => {
 
   it('lists provider metadata with env availability', () => {
     process.env.OPENAI_API_KEY = 'test-key';
+    const providers = service.getProviders();
+    const openaiProvider = providers.find(
+      (provider) => provider.provider === 'openai',
+    );
+    const geminiProvider = providers.find(
+      (provider) => provider.provider === 'gemini',
+    );
+    const anthropicProvider = providers.find(
+      (provider) => provider.provider === 'anthropic',
+    );
 
-    expect(service.getProviders()).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          provider: 'openai',
-          enabled: true,
-          defaultModel: 'gpt-5.4',
-        }),
-        expect.objectContaining({
-          provider: 'gemini',
-          enabled: false,
-        }),
-        expect.objectContaining({
-          provider: 'anthropic',
-          aliases: ['claude'],
-        }),
-      ]),
+    expect(openaiProvider).toEqual(
+      expect.objectContaining({
+        provider: 'openai',
+        enabled: true,
+        defaultModel: 'gpt-5.4',
+      }),
+    );
+    expect(openaiProvider?.exampleModels).toEqual(
+      expect.arrayContaining(['gpt-5.4', 'gpt-5-mini', 'gpt-5.4-nano']),
+    );
+    expect(geminiProvider).toEqual(
+      expect.objectContaining({
+        provider: 'gemini',
+        enabled: false,
+      }),
+    );
+    expect(anthropicProvider).toEqual(
+      expect.objectContaining({
+        provider: 'anthropic',
+        aliases: ['claude'],
+      }),
     );
   });
 
@@ -69,7 +84,7 @@ describe('LlmService', () => {
     await expect(
       service.chat({
         provider: 'gpt',
-        model: 'gpt-5.4',
+        model: 'gpt-5.4-nano',
         messages: [
           { role: 'system', content: 'Be concise.' },
           { role: 'user', content: 'Hello' },
@@ -78,7 +93,7 @@ describe('LlmService', () => {
       }),
     ).resolves.toEqual({
       provider: 'openai',
-      model: 'gpt-5.4',
+      model: 'gpt-5.4-nano',
       responseId: 'resp_123',
       text: 'Hello from OpenAI',
       finishReason: 'completed',
@@ -107,7 +122,7 @@ describe('LlmService', () => {
     expect(init?.signal).toBeInstanceOf(AbortSignal);
 
     expect(body).toEqual({
-      model: 'gpt-5.4',
+      model: 'gpt-5.4-nano',
       store: false,
       instructions: 'Be concise.',
       input: [{ role: 'user', content: 'Hello' }],

@@ -1,22 +1,121 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import {
+  ActionIcon,
+  Alert,
+  AppShell,
+  Autocomplete,
+  Avatar,
+  Badge,
+  Box,
+  Button,
+  Container,
+  Divider,
+  Grid,
+  Group,
+  Loader,
+  Paper,
+  ScrollArea,
+  SimpleGrid,
+  Stack,
+  Text,
+  Textarea,
+  ThemeIcon,
+  Title,
+} from "@mantine/core";
+import { notifications } from "@mantine/notifications";
+import {
+  IconAlertCircle,
+  IconArrowUpRight,
+  IconBrain,
+  IconCheck,
+  IconCircleDot,
+  IconRefresh,
+  IconRobot,
+  IconSend2,
+  IconSparkles,
+  IconTrash,
+  IconX,
+} from "@tabler/icons-react";
+import {
+  FormEvent,
+  KeyboardEvent,
+  startTransition,
+  useEffect,
+  useState,
+} from "react";
 
 const apiBaseUrl =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:3001";
 
-type ApiHealthResponse = {
-  service: string;
-  status: "ok";
-  timestamp: string;
+type ProviderId = "openai" | "gemini" | "anthropic";
+
+type ProviderInfo = {
+  provider: ProviderId;
+  displayName: string;
+  aliases: string[];
+  apiKeyEnv: string;
+  enabled: boolean;
+  defaultModel: string;
+  exampleModels: string[];
+  docsUrl: string;
+  allowCustomModel: true;
 };
 
-type ApiEchoResponse = {
-  length: number;
-  received: string;
-  timestamp: string;
-  uppercase: string;
+type ProvidersResponse = {
+  providers: ProviderInfo[];
 };
+
+type LlmChatRequest = {
+  provider: string;
+  model: string;
+  messages: Array<{
+    role: "system" | "user" | "assistant";
+    content: string;
+  }>;
+  maxTokens?: number;
+};
+
+type LlmChatResponse = {
+  provider: ProviderId;
+  model: string;
+  responseId?: string;
+  text: string;
+  finishReason?: string;
+  usage: {
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+  };
+};
+
+type ChatBubble = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  provider?: ProviderId;
+  model?: string;
+  createdAt: string;
+};
+
+async function getErrorMessage(response: Response): Promise<string> {
+  const body = await response.text();
+
+  if (!body) {
+    return `Request failed with status ${response.status}`;
+  }
+
+  try {
+    const parsed = JSON.parse(body) as { message?: string };
+    if (typeof parsed.message === "string") {
+      return parsed.message;
+    }
+  } catch {
+    return body;
+  }
+
+  return body;
+}
 
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBaseUrl}${path}`, {
@@ -28,214 +127,775 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   });
 
   if (!response.ok) {
-    const body = await response.text();
-    throw new Error(body || `Request failed with status ${response.status}`);
+    throw new Error(await getErrorMessage(response));
   }
 
   return (await response.json()) as T;
 }
 
-function JsonPanel({
-  title,
-  value,
+function providerAccent(provider: ProviderId): string {
+  switch (provider) {
+    case "openai":
+      return "teal";
+    case "gemini":
+      return "orange";
+    case "anthropic":
+      return "violet";
+  }
+}
+
+function formatUsage(response: LlmChatResponse | null) {
+  if (!response) {
+    return "No response yet";
+  }
+
+  const inputTokens = response.usage.inputTokens ?? 0;
+  const outputTokens = response.usage.outputTokens ?? 0;
+  const totalTokens =
+    response.usage.totalTokens ?? inputTokens + outputTokens;
+
+  return `${inputTokens} in / ${outputTokens} out / ${totalTokens} total`;
+}
+
+function ProviderCard({
+  provider,
+  isSelected,
+  onSelect,
 }: {
-  title: string;
-  value: unknown;
+  provider: ProviderInfo;
+  isSelected: boolean;
+  onSelect: () => void;
 }) {
+  const accent = providerAccent(provider.provider);
+
   return (
-    <div className="rounded-3xl border border-black/10 bg-black px-4 py-4 text-sm text-lime-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]">
-      <p className="mb-3 text-xs font-semibold uppercase tracking-[0.24em] text-lime-400/80">
-        {title}
-      </p>
-      <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-xs leading-6">
-        {JSON.stringify(value, null, 2)}
-      </pre>
-    </div>
+    <Paper
+      component="button"
+      onClick={onSelect}
+      p="md"
+      radius="xl"
+      shadow={isSelected ? "lg" : "xs"}
+      withBorder
+      style={{
+        width: "100%",
+        cursor: "pointer",
+        textAlign: "left",
+        background: isSelected
+          ? "linear-gradient(145deg, rgba(255,255,255,0.98), rgba(242,252,251,0.94))"
+          : "rgba(255,255,255,0.84)",
+        borderColor: isSelected
+          ? "rgba(36, 170, 146, 0.34)"
+          : "rgba(15, 23, 42, 0.08)",
+      }}
+    >
+      <Group justify="space-between" align="flex-start" wrap="nowrap">
+        <Group wrap="nowrap" align="flex-start">
+          <Avatar color={accent} radius="xl" variant="light">
+            {provider.displayName.slice(0, 1)}
+          </Avatar>
+          <Box>
+            <Text fw={700} size="sm">
+              {provider.displayName}
+            </Text>
+            <Text c="dimmed" size="xs" mt={2}>
+              Default: {provider.defaultModel}
+            </Text>
+          </Box>
+        </Group>
+        <Badge
+          color={provider.enabled ? "teal" : "gray"}
+          variant={provider.enabled ? "light" : "outline"}
+        >
+          {provider.enabled ? "Ready" : "Key missing"}
+        </Badge>
+      </Group>
+
+      <Group gap={6} mt="md">
+        {provider.exampleModels.slice(0, 2).map((exampleModel) => (
+          <Badge key={exampleModel} color={accent} variant="dot">
+            {exampleModel}
+          </Badge>
+        ))}
+      </Group>
+    </Paper>
+  );
+}
+
+function ChatMessage({ message }: { message: ChatBubble }) {
+  const isAssistant = message.role === "assistant";
+
+  return (
+    <Group
+      align="flex-start"
+      justify={isAssistant ? "flex-start" : "flex-end"}
+      wrap="nowrap"
+    >
+      {isAssistant ? (
+        <ThemeIcon size={42} radius="xl" variant="light" color="brand">
+          <IconRobot size={20} />
+        </ThemeIcon>
+      ) : null}
+
+      <Paper
+        p="md"
+        radius="xl"
+        shadow="sm"
+        style={{
+          maxWidth: "82%",
+          background: isAssistant
+            ? "rgba(255,255,255,0.92)"
+            : "linear-gradient(165deg, rgba(10,83,73,0.98), rgba(20,122,107,0.92))",
+          color: isAssistant ? "var(--mantine-color-dark-9)" : "white",
+          border: isAssistant ? "1px solid rgba(15, 23, 42, 0.06)" : "none",
+        }}
+      >
+        <Group justify="space-between" gap="xs" mb="xs">
+          <Text fw={700} size="sm">
+            {isAssistant ? "Assistant" : "You"}
+          </Text>
+          <Group gap={6}>
+            {message.provider ? (
+              <Badge color={providerAccent(message.provider)} variant="light">
+                {message.provider}
+              </Badge>
+            ) : null}
+            {message.model ? (
+              <Badge color="gray" variant="outline">
+                {message.model}
+              </Badge>
+            ) : null}
+          </Group>
+        </Group>
+        <Text size="sm" style={{ whiteSpace: "pre-wrap" }}>
+          {message.content}
+        </Text>
+      </Paper>
+
+      {!isAssistant ? (
+        <ThemeIcon size={42} radius="xl" variant="filled" color="dark">
+          <IconCircleDot size={18} />
+        </ThemeIcon>
+      ) : null}
+    </Group>
   );
 }
 
 export default function Home() {
-  const [health, setHealth] = useState<ApiHealthResponse | null>(null);
-  const [healthError, setHealthError] = useState<string | null>(null);
-  const [healthLoading, setHealthLoading] = useState(true);
-  const [message, setMessage] = useState("Graph plot handshake");
-  const [echoResponse, setEchoResponse] = useState<ApiEchoResponse | null>(null);
-  const [echoError, setEchoError] = useState<string | null>(null);
-  const [echoLoading, setEchoLoading] = useState(false);
+  const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [providersLoading, setProvidersLoading] = useState(true);
+  const [providersError, setProvidersError] = useState<string | null>(null);
+  const [selectedProvider, setSelectedProvider] = useState<ProviderId>("openai");
+  const [model, setModel] = useState("gpt-5.4");
+  const [systemPrompt, setSystemPrompt] = useState(
+    "You are a precise assistant helping with graph-plot related questions.",
+  );
+  const [draft, setDraft] = useState("");
+  const [chatMessages, setChatMessages] = useState<ChatBubble[]>([]);
+  const [isSending, setIsSending] = useState(false);
+  const [lastResponse, setLastResponse] = useState<LlmChatResponse | null>(null);
 
-  async function loadHealth() {
-    setHealthLoading(true);
-    setHealthError(null);
+  const currentProvider =
+    providers.find((provider) => provider.provider === selectedProvider) ?? null;
+
+  async function loadProviders() {
+    setProvidersLoading(true);
+    setProvidersError(null);
 
     try {
-      const nextHealth = await fetchJson<ApiHealthResponse>("/api/health", {
+      const response = await fetchJson<ProvidersResponse>("/api/llm/providers", {
         cache: "no-store",
       });
-      setHealth(nextHealth);
-    } catch (error) {
-      setHealth(null);
-      setHealthError(
-        error instanceof Error ? error.message : "Unable to reach backend.",
+
+      if (response.providers.length === 0) {
+        throw new Error("Backend returned no provider metadata.");
+      }
+
+      setProviders(response.providers);
+
+      const selected =
+        response.providers.find(
+          (provider) => provider.provider === selectedProvider,
+        ) ??
+        response.providers.find((provider) => provider.enabled) ??
+        response.providers[0];
+
+      setSelectedProvider(selected.provider);
+      setModel((currentModel) =>
+        currentModel.trim() &&
+        selected.provider === selectedProvider
+          ? currentModel
+          : selected.defaultModel,
       );
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Unable to load provider metadata.";
+
+      setProviders([]);
+      setProvidersError(message);
+      notifications.show({
+        title: "Backend connection failed",
+        message,
+        color: "red",
+      });
     } finally {
-      setHealthLoading(false);
+      setProvidersLoading(false);
     }
   }
 
   useEffect(() => {
-    void loadHealth();
+    void loadProviders();
+    // This is a one-time bootstrap fetch; user-triggered refreshes use the same function.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  function handleProviderSelect(provider: ProviderInfo) {
+    setSelectedProvider(provider.provider);
+    setModel(provider.defaultModel);
+  }
+
+  async function submitPrompt() {
+    const prompt = draft.trim();
+    const selectedModel = model.trim();
+
+    if (!currentProvider) {
+      notifications.show({
+        title: "No provider selected",
+        message: "Load provider metadata before sending a request.",
+        color: "red",
+      });
+      return;
+    }
+
+    if (!currentProvider.enabled) {
+      notifications.show({
+        title: "Provider unavailable",
+        message: `Set ${currentProvider.apiKeyEnv} in the backend before chatting with ${currentProvider.displayName}.`,
+        color: "orange",
+      });
+      return;
+    }
+
+    if (!prompt) {
+      notifications.show({
+        title: "Empty message",
+        message: "Write a message before sending.",
+        color: "orange",
+      });
+      return;
+    }
+
+    if (!selectedModel) {
+      notifications.show({
+        title: "Model required",
+        message: "Choose or type a model name before sending.",
+        color: "orange",
+      });
+      return;
+    }
+
+    const userMessage: ChatBubble = {
+      id: crypto.randomUUID(),
+      role: "user",
+      content: prompt,
+      createdAt: new Date().toISOString(),
+    };
+
+    const requestMessages: LlmChatRequest["messages"] = [
+      ...(systemPrompt.trim()
+        ? [{ role: "system" as const, content: systemPrompt.trim() }]
+        : []),
+      ...chatMessages.map((message) => ({
+        role: message.role,
+        content: message.content,
+      })),
+      { role: "user" as const, content: prompt },
+    ];
+
+    setDraft("");
+    startTransition(() => {
+      setChatMessages((currentMessages) => [...currentMessages, userMessage]);
+    });
+    setIsSending(true);
+
+    try {
+      const response = await fetchJson<LlmChatResponse>("/api/llm/chat", {
+        method: "POST",
+        body: JSON.stringify({
+          provider: currentProvider.provider,
+          model: selectedModel,
+          messages: requestMessages,
+        } satisfies LlmChatRequest),
+      });
+
+      setLastResponse(response);
+
+      const assistantMessage: ChatBubble = {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        content: response.text,
+        provider: response.provider,
+        model: response.model,
+        createdAt: new Date().toISOString(),
+      };
+
+      startTransition(() => {
+        setChatMessages((currentMessages) => [
+          ...currentMessages,
+          assistantMessage,
+        ]);
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Unable to submit prompt to the backend.";
+
+      notifications.show({
+        title: "Chat request failed",
+        message,
+        color: "red",
+      });
+    } finally {
+      setIsSending(false);
+    }
+  }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setEchoLoading(true);
-    setEchoError(null);
+    await submitPrompt();
+  }
 
-    try {
-      const response = await fetchJson<ApiEchoResponse>("/api/test/echo", {
-        body: JSON.stringify({ message }),
-        method: "POST",
-      });
-      setEchoResponse(response);
-    } catch (error) {
-      setEchoResponse(null);
-      setEchoError(
-        error instanceof Error ? error.message : "Unable to submit payload.",
-      );
-    } finally {
-      setEchoLoading(false);
+  function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      void submitPrompt();
     }
   }
 
   return (
-    <div className="min-h-screen px-6 py-10 text-stone-950 sm:px-10">
-      <main className="mx-auto flex w-full max-w-6xl flex-col gap-8">
-        <section className="overflow-hidden rounded-[2rem] border border-black/10 bg-[linear-gradient(135deg,rgba(8,47,73,0.95),rgba(22,101,52,0.9))] p-8 text-stone-50 shadow-[0_24px_80px_rgba(15,23,42,0.18)] sm:p-10">
-          <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
-            <div className="max-w-3xl space-y-4">
-              <p className="text-sm font-semibold uppercase tracking-[0.32em] text-cyan-200/85">
-                Graph Plot Frontend
-              </p>
-              <h1 className="max-w-2xl text-4xl font-semibold tracking-tight sm:text-5xl">
-                Frontend and backend are now split cleanly.
-              </h1>
-              <p className="max-w-2xl text-base leading-7 text-cyan-50/85 sm:text-lg">
-                This page runs entirely in the browser and talks directly to the
-                Nest API. No route handlers, server actions, or proxy logic are
-                left inside the Next app.
-              </p>
-            </div>
-            <div className="rounded-3xl border border-white/15 bg-white/10 px-5 py-4 backdrop-blur">
-              <p className="text-xs font-semibold uppercase tracking-[0.24em] text-cyan-100/75">
-                API Base URL
-              </p>
-              <p className="mt-2 font-mono text-sm text-white">{apiBaseUrl}</p>
-            </div>
-          </div>
-        </section>
-
-        <section className="grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
-          <div className="rounded-[2rem] border border-black/10 bg-white/80 p-6 shadow-[0_20px_70px_rgba(15,23,42,0.08)] backdrop-blur">
-            <div className="flex flex-col gap-4 border-b border-black/10 pb-6 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <p className="text-sm font-semibold uppercase tracking-[0.24em] text-emerald-700">
-                  GET /api/health
-                </p>
-                <h2 className="mt-2 text-2xl font-semibold tracking-tight text-stone-950">
-                  Backend status check
-                </h2>
-              </div>
-              <button
-                className="rounded-full bg-stone-950 px-5 py-3 text-sm font-semibold text-stone-50 transition hover:bg-stone-800 disabled:cursor-not-allowed disabled:bg-stone-500"
-                onClick={() => void loadHealth()}
-                disabled={healthLoading}
-                type="button"
+    <AppShell
+      header={{ height: 88 }}
+      padding="lg"
+      styles={{
+        main: {
+          background: "transparent",
+        },
+      }}
+    >
+      <AppShell.Header
+        withBorder={false}
+        style={{
+          backdropFilter: "blur(20px)",
+          background: "rgba(246,240,231,0.74)",
+          borderBottom: "1px solid rgba(15, 23, 42, 0.08)",
+        }}
+      >
+        <Container size="xl" h="100%">
+          <Group h="100%" justify="space-between">
+            <Group>
+              <ThemeIcon
+                size={52}
+                radius="xl"
+                variant="gradient"
+                gradient={{ from: "teal.6", to: "cyan.6", deg: 135 }}
               >
-                {healthLoading ? "Checking..." : "Refresh status"}
-              </button>
-            </div>
-
-            <div className="mt-6 space-y-4">
-              <div className="rounded-3xl bg-stone-100/80 p-5">
-                <p className="text-sm font-medium text-stone-600">
-                  Frontend origin
-                </p>
-                <p className="mt-1 font-mono text-sm text-stone-950">
-                  http://localhost:3000
-                </p>
-              </div>
-
-              {healthError ? (
-                <div className="rounded-3xl border border-rose-200 bg-rose-50 px-5 py-4 text-sm text-rose-700">
-                  {healthError}
-                </div>
-              ) : null}
-
-              {health ? (
-                <JsonPanel title="Health response" value={health} />
-              ) : (
-                <div className="rounded-3xl border border-dashed border-black/15 bg-stone-50 px-5 py-8 text-sm text-stone-500">
-                  {healthLoading
-                    ? "Waiting for backend response..."
-                    : "No health payload loaded yet."}
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div className="rounded-[2rem] border border-black/10 bg-[#fff9ef] p-6 shadow-[0_20px_70px_rgba(15,23,42,0.08)]">
-            <p className="text-sm font-semibold uppercase tracking-[0.24em] text-amber-700">
-              POST /api/test/echo
-            </p>
-            <h2 className="mt-2 text-2xl font-semibold tracking-tight text-stone-950">
-              Payload round-trip
-            </h2>
-            <p className="mt-3 text-sm leading-7 text-stone-600">
-              Submit text from the browser and verify the backend receives it,
-              trims it, and returns transformed data.
-            </p>
-
-            <form className="mt-6 space-y-4" onSubmit={handleSubmit}>
-              <label className="block">
-                <span className="text-sm font-medium text-stone-700">
-                  Test message
-                </span>
-                <textarea
-                  className="mt-2 min-h-32 w-full rounded-3xl border border-black/10 bg-white px-4 py-4 text-base text-stone-950 outline-none transition focus:border-emerald-500 focus:ring-4 focus:ring-emerald-100"
-                  onChange={(event) => setMessage(event.target.value)}
-                  placeholder="Type a message for the Nest backend..."
-                  value={message}
-                />
-              </label>
-
-              <button
-                className="w-full rounded-full bg-emerald-700 px-5 py-3 text-sm font-semibold text-white transition hover:bg-emerald-800 disabled:cursor-not-allowed disabled:bg-emerald-400"
-                disabled={echoLoading}
-                type="submit"
+                <IconSparkles size={24} />
+              </ThemeIcon>
+              <Box>
+                <Text fw={800} size="xl">
+                  Graph Plot LLM Console
+                </Text>
+                <Text c="dimmed" size="sm">
+                  Choose a provider, switch models, and chat through your Nest API.
+                </Text>
+              </Box>
+            </Group>
+            <Group gap="sm">
+              <Badge color="dark" size="lg" variant="light">
+                {apiBaseUrl}
+              </Badge>
+              <ActionIcon
+                aria-label="Refresh providers"
+                color="dark"
+                onClick={() => void loadProviders()}
+                radius="xl"
+                size="xl"
+                variant="subtle"
               >
-                {echoLoading ? "Sending..." : "Send test payload"}
-              </button>
-            </form>
+                <IconRefresh size={18} />
+              </ActionIcon>
+            </Group>
+          </Group>
+        </Container>
+      </AppShell.Header>
 
-            <div className="mt-6 space-y-4">
-              {echoError ? (
-                <div className="rounded-3xl border border-rose-200 bg-rose-50 px-5 py-4 text-sm text-rose-700">
-                  {echoError}
-                </div>
-              ) : null}
+      <AppShell.Main>
+        <Container size="xl" py="xl">
+          <Stack gap="xl">
+            <Paper
+              p="xl"
+              radius="32px"
+              shadow="xl"
+              style={{
+                background:
+                  "linear-gradient(145deg, rgba(8,47,73,0.96), rgba(15,118,110,0.88))",
+                color: "white",
+              }}
+            >
+              <Grid align="center">
+                <Grid.Col span={{ base: 12, lg: 8 }}>
+                  <Stack gap="sm">
+                    <Badge
+                      color="cyan"
+                      variant="light"
+                      style={{ width: "fit-content" }}
+                    >
+                      Advanced UI + model switching
+                    </Badge>
+                    <Title order={1}>A real chat workspace for your LLM API.</Title>
+                    <Text c="rgba(255,255,255,0.82)" maw={720} size="lg">
+                      This page is now a frontend for `/api/llm/chat` and
+                      `/api/llm/providers`, with provider discovery, model
+                      selection, and conversation history.
+                    </Text>
+                  </Stack>
+                </Grid.Col>
+                <Grid.Col span={{ base: 12, lg: 4 }}>
+                  <SimpleGrid cols={2} spacing="md">
+                    <Paper
+                      p="md"
+                      radius="xl"
+                      style={{ background: "rgba(255,255,255,0.12)" }}
+                    >
+                      <Text
+                        c="rgba(255,255,255,0.72)"
+                        size="xs"
+                        style={{ textTransform: "uppercase" }}
+                      >
+                        Providers
+                      </Text>
+                      <Text fw={800} size="xl">
+                        {providers.length || 3}
+                      </Text>
+                    </Paper>
+                    <Paper
+                      p="md"
+                      radius="xl"
+                      style={{ background: "rgba(255,255,255,0.12)" }}
+                    >
+                      <Text
+                        c="rgba(255,255,255,0.72)"
+                        size="xs"
+                        style={{ textTransform: "uppercase" }}
+                      >
+                        Last usage
+                      </Text>
+                      <Text fw={700} size="sm">
+                        {formatUsage(lastResponse)}
+                      </Text>
+                    </Paper>
+                  </SimpleGrid>
+                </Grid.Col>
+              </Grid>
+            </Paper>
 
-              {echoResponse ? (
-                <JsonPanel title="Echo response" value={echoResponse} />
-              ) : (
-                <div className="rounded-3xl border border-dashed border-black/15 bg-white/70 px-5 py-8 text-sm text-stone-500">
-                  Submit the form to confirm the browser can post JSON to the
-                  backend.
-                </div>
-              )}
-            </div>
-          </div>
-        </section>
-      </main>
-    </div>
+            <Grid gutter="xl">
+              <Grid.Col span={{ base: 12, lg: 4 }}>
+                <Stack gap="lg">
+                  <Paper
+                    p="lg"
+                    radius="30px"
+                    shadow="md"
+                    style={{ background: "rgba(255,255,255,0.86)" }}
+                  >
+                    <Group justify="space-between" mb="md">
+                      <Box>
+                        <Text fw={800}>Provider routing</Text>
+                        <Text c="dimmed" size="sm">
+                          Pick a provider and override its model if needed.
+                        </Text>
+                      </Box>
+                      {providersLoading ? <Loader size="sm" /> : null}
+                    </Group>
+
+                    {providersError ? (
+                      <Alert
+                        color="red"
+                        icon={<IconAlertCircle size={16} />}
+                        mb="md"
+                        radius="xl"
+                      >
+                        {providersError}
+                      </Alert>
+                    ) : null}
+
+                    <Stack gap="sm">
+                      {providers.map((provider) => (
+                        <ProviderCard
+                          key={provider.provider}
+                          provider={provider}
+                          isSelected={provider.provider === selectedProvider}
+                          onSelect={() => handleProviderSelect(provider)}
+                        />
+                      ))}
+                    </Stack>
+
+                    <Divider my="lg" />
+
+                    <Stack gap="sm">
+                      <Autocomplete
+                        data={currentProvider?.exampleModels ?? []}
+                        label="Model"
+                        onChange={setModel}
+                        placeholder="Type or choose a model"
+                        radius="xl"
+                        value={model}
+                      />
+
+                      <Textarea
+                        autosize
+                        label="System prompt"
+                        minRows={4}
+                        onChange={(event) =>
+                          setSystemPrompt(event.currentTarget.value)
+                        }
+                        placeholder="Define the assistant behavior for this thread"
+                        radius="xl"
+                        value={systemPrompt}
+                      />
+
+                      {currentProvider ? (
+                        <Group justify="space-between" mt="xs">
+                          <Button
+                            component="a"
+                            href={currentProvider.docsUrl}
+                            leftSection={<IconArrowUpRight size={16} />}
+                            radius="xl"
+                            target="_blank"
+                            variant="light"
+                          >
+                            Provider docs
+                          </Button>
+                          <Badge
+                            color={currentProvider.enabled ? "teal" : "orange"}
+                            variant="light"
+                          >
+                            {currentProvider.apiKeyEnv}
+                          </Badge>
+                        </Group>
+                      ) : null}
+                    </Stack>
+                  </Paper>
+
+                  <Paper
+                    p="lg"
+                    radius="30px"
+                    shadow="md"
+                    style={{ background: "rgba(255,255,255,0.86)" }}
+                  >
+                    <Group justify="space-between" mb="md">
+                      <Box>
+                        <Text fw={800}>Response telemetry</Text>
+                        <Text c="dimmed" size="sm">
+                          Metadata from the last completed response.
+                        </Text>
+                      </Box>
+                      <ThemeIcon color="brand" radius="xl" variant="light">
+                        <IconBrain size={18} />
+                      </ThemeIcon>
+                    </Group>
+
+                    {lastResponse ? (
+                      <Stack gap="sm">
+                        <Group gap="xs">
+                          <Badge color={providerAccent(lastResponse.provider)}>
+                            {lastResponse.provider}
+                          </Badge>
+                          <Badge color="gray" variant="outline">
+                            {lastResponse.model}
+                          </Badge>
+                        </Group>
+                        <Text c="dimmed" size="sm">
+                          Response id
+                        </Text>
+                        <Text
+                          fw={600}
+                          size="sm"
+                          style={{ fontFamily: "var(--font-geist-mono)" }}
+                        >
+                          {lastResponse.responseId ?? "No response id"}
+                        </Text>
+                        <Text size="sm">
+                          Finish reason: {lastResponse.finishReason ?? "n/a"}
+                        </Text>
+                        <Text size="sm">{formatUsage(lastResponse)}</Text>
+                      </Stack>
+                    ) : (
+                      <Text c="dimmed" size="sm">
+                        Send a message to populate response metadata.
+                      </Text>
+                    )}
+                  </Paper>
+                </Stack>
+              </Grid.Col>
+
+              <Grid.Col span={{ base: 12, lg: 8 }}>
+                <Paper
+                  p="lg"
+                  radius="32px"
+                  shadow="xl"
+                  style={{
+                    background: "rgba(255,255,255,0.82)",
+                    backdropFilter: "blur(18px)",
+                  }}
+                >
+                  <Group justify="space-between" mb="md">
+                    <Box>
+                      <Text fw={800} size="lg">
+                        Conversation
+                      </Text>
+                      <Text c="dimmed" size="sm">
+                        Current target: {currentProvider?.displayName ?? "Loading..."}{" "}
+                        with {model || "no model"}
+                      </Text>
+                    </Box>
+                    <Group gap="sm">
+                      {currentProvider?.enabled ? (
+                        <Badge color="teal" leftSection={<IconCheck size={12} />}>
+                          Provider ready
+                        </Badge>
+                      ) : (
+                        <Badge color="orange" leftSection={<IconX size={12} />}>
+                          Key missing
+                        </Badge>
+                      )}
+                      <ActionIcon
+                        aria-label="Clear conversation"
+                        color="red"
+                        onClick={() => {
+                          setChatMessages([]);
+                          setLastResponse(null);
+                        }}
+                        radius="xl"
+                        variant="light"
+                      >
+                        <IconTrash size={18} />
+                      </ActionIcon>
+                    </Group>
+                  </Group>
+
+                  {!currentProvider?.enabled && currentProvider ? (
+                    <Alert
+                      color="orange"
+                      icon={<IconAlertCircle size={16} />}
+                      mb="md"
+                      radius="xl"
+                    >
+                      {currentProvider.apiKeyEnv} is not configured in the
+                      backend. You can still change providers and models, but
+                      sending is disabled until the key is set.
+                    </Alert>
+                  ) : null}
+
+                  <ScrollArea h={560} offsetScrollbars scrollbarSize={8}>
+                    <Stack gap="md" py="xs">
+                      {chatMessages.length === 0 ? (
+                        <Paper
+                          p="xl"
+                          radius="28px"
+                          withBorder
+                          style={{
+                            borderStyle: "dashed",
+                            background:
+                              "linear-gradient(180deg, rgba(246,252,251,0.92), rgba(255,255,255,0.86))",
+                          }}
+                        >
+                          <Stack align="center" gap="sm">
+                            <ThemeIcon
+                              color="brand"
+                              radius="xl"
+                              size={52}
+                              variant="light"
+                            >
+                              <IconSparkles size={24} />
+                            </ThemeIcon>
+                            <Text fw={700}>Start the first turn</Text>
+                            <Text c="dimmed" maw={480} ta="center">
+                              Pick a provider card, confirm the model, and send
+                              a prompt. The frontend will send the full message
+                              history plus your system prompt to the backend.
+                            </Text>
+                          </Stack>
+                        </Paper>
+                      ) : null}
+
+                      {chatMessages.map((message) => (
+                        <ChatMessage key={message.id} message={message} />
+                      ))}
+
+                      {isSending ? (
+                        <Group justify="flex-start">
+                          <Paper
+                            p="md"
+                            radius="xl"
+                            shadow="xs"
+                            style={{ background: "rgba(255,255,255,0.92)" }}
+                          >
+                            <Group gap="sm">
+                              <Loader size="sm" />
+                              <Text size="sm" c="dimmed">
+                                Waiting for {currentProvider?.displayName ?? "provider"}...
+                              </Text>
+                            </Group>
+                          </Paper>
+                        </Group>
+                      ) : null}
+                    </Stack>
+                  </ScrollArea>
+
+                  <Divider my="lg" />
+
+                  <form onSubmit={handleSubmit}>
+                    <Stack gap="md">
+                      <Textarea
+                        autosize
+                        description="Press Ctrl/Cmd + Enter to send"
+                        minRows={4}
+                        onChange={(event) => setDraft(event.currentTarget.value)}
+                        onKeyDown={handleComposerKeyDown}
+                        placeholder="Ask a question, test a prompt, or compare models..."
+                        radius="28px"
+                        value={draft}
+                      />
+                      <Group justify="space-between">
+                        <Text c="dimmed" size="sm">
+                          Model suggestions come from `/api/llm/providers`, but
+                          you can type any valid model id.
+                        </Text>
+                        <Button
+                          disabled={
+                            isSending ||
+                            !draft.trim() ||
+                            !model.trim() ||
+                            !currentProvider?.enabled
+                          }
+                          leftSection={<IconSend2 size={16} />}
+                          radius="xl"
+                          type="submit"
+                        >
+                          Send to model
+                        </Button>
+                      </Group>
+                    </Stack>
+                  </form>
+                </Paper>
+              </Grid.Col>
+            </Grid>
+          </Stack>
+        </Container>
+      </AppShell.Main>
+    </AppShell>
   );
 }

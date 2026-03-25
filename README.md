@@ -55,3 +55,35 @@ Provider aliases:
 - `claude` -> `anthropic`
 
 The API accepts any model string, so you can swap models without code changes. Current example model IDs in the metadata endpoint are based on the providers' official docs.
+
+## Exec API
+
+Available backend endpoints:
+
+- `GET /api/exec/capabilities`
+- `POST /api/exec/run`
+
+Supported runtimes:
+
+- `python`
+- `bash`
+- `powershell`
+- `shell`
+
+`shell` uses the backend OS default shell:
+
+- Windows: PowerShell
+- macOS/Linux: Bash
+
+Example request:
+
+```json
+{
+  "runtime": "python",
+  "code": "print('hello from python')",
+  "timeoutMs": 10000,
+  "args": []
+}
+```
+
+The execution response includes the selected runtime, resolved command, stdout, stderr, structured logs, exit status, and collected errors.

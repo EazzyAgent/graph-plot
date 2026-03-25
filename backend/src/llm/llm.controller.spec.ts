@@ -13,7 +13,7 @@ describe('LlmController', () => {
     apiKeyEnv: 'OPENAI_API_KEY',
     enabled: false,
     defaultModel: 'gpt-5.4',
-    exampleModels: ['gpt-5.4'],
+    exampleModels: ['gpt-5.4', 'gpt-5-mini', 'gpt-5.4-nano'],
     docsUrl: 'https://developers.openai.com/api/docs/models',
     allowCustomModel: true,
   };
