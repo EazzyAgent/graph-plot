@@ -1,1 +1,57 @@
-# graph-plot
+# Graph Plot
+
+This repo now keeps the Next frontend and Nest backend separate.
+
+## Local development
+
+- Frontend: `cd app && npm run dev` on `http://localhost:3000`
+- Backend: `cd backend && npm run start:dev` on `http://localhost:3001`
+
+## Frontend to backend wiring
+
+- The browser app calls the Nest API directly with `NEXT_PUBLIC_API_BASE_URL`
+- Default API base URL: `http://localhost:3001`
+- Test endpoints:
+  - `GET /api/health`
+  - `POST /api/test/echo`
+
+## Backend config
+
+- CORS allows `http://localhost:3000` by default
+- Override frontend origin with `FRONTEND_ORIGIN`
+- Override backend port with `PORT`
+
+## LLM API
+
+Set provider API keys in `backend/.env` or your shell:
+
+- `OPENAI_API_KEY`
+- `GEMINI_API_KEY`
+- `ANTHROPIC_API_KEY`
+
+Available backend endpoints:
+
+- `GET /api/llm/providers`
+- `GET /api/llm/providers/:provider`
+- `POST /api/llm/chat`
+
+Example request:
+
+```json
+{
+  "provider": "gpt",
+  "model": "gpt-5.4",
+  "messages": [
+    { "role": "system", "content": "You are a concise coding assistant." },
+    { "role": "user", "content": "Explain breadth-first search in one paragraph." }
+  ],
+  "maxTokens": 300
+}
+```
+
+Provider aliases:
+
+- `gpt` -> `openai`
+- `claude` -> `anthropic`
+
+The API accepts any model string, so you can swap models without code changes. Current example model IDs in the metadata endpoint are based on the providers' official docs.
