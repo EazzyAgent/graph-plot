@@ -73,6 +73,18 @@ describe('AppController (e2e)', () => {
       });
   });
 
+  it('/api/llm/chat rejects invalid tools flag (POST)', () => {
+    return request(app.getHttpServer())
+      .post('/api/llm/chat')
+      .send({
+        provider: 'openai',
+        model: 'gpt-5.4',
+        messages: [{ role: 'user', content: 'Hello' }],
+        tools: { fileSystem: 'yes' },
+      })
+      .expect(400);
+  });
+
   it('/api/exec/capabilities (GET)', () => {
     return request(app.getHttpServer())
       .get('/api/exec/capabilities')

@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Accordion,
   ActionIcon,
   Alert,
   AppShell,
@@ -9,6 +10,7 @@ import {
   Badge,
   Box,
   Button,
+  Code,
   Container,
   Divider,
   Grid,
@@ -18,6 +20,7 @@ import {
   ScrollArea,
   SimpleGrid,
   Stack,
+  Switch,
   Text,
   Textarea,
   ThemeIcon,
@@ -30,6 +33,7 @@ import {
   IconBrain,
   IconCheck,
   IconCircleDot,
+  IconFolderSearch,
   IconRefresh,
   IconRobot,
   IconSend2,
@@ -66,6 +70,10 @@ type ProvidersResponse = {
   providers: ProviderInfo[];
 };
 
+type LlmChatToolOptions = {
+  fileSystem?: boolean;
+};
+
 type LlmChatRequest = {
   provider: string;
   model: string;
@@ -74,6 +82,7 @@ type LlmChatRequest = {
     content: string;
   }>;
   maxTokens?: number;
+  tools?: LlmChatToolOptions;
 };
 
 type LlmChatResponse = {
@@ -87,6 +96,16 @@ type LlmChatResponse = {
     outputTokens?: number;
     totalTokens?: number;
   };
+  toolTrace?: LlmToolTraceEntry[];
+};
+
+type LlmToolTraceEntry = {
+  round: number;
+  toolName: string;
+  input: unknown;
+  result: unknown;
+  isError: boolean;
+  callId?: string;
 };
 
 type ChatBubble = {
@@ -95,6 +114,7 @@ type ChatBubble = {
   content: string;
   provider?: ProviderId;
   model?: string;
+  toolTrace?: LlmToolTraceEntry[];
   createdAt: string;
 };
 
@@ -155,6 +175,133 @@ function formatUsage(response: LlmChatResponse | null) {
     response.usage.totalTokens ?? inputTokens + outputTokens;
 
   return `${inputTokens} in / ${outputTokens} out / ${totalTokens} total`;
+}
+
+function formatTracePayload(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function ToolTracePanel({
+  traces,
+  compact = false,
+}: {
+  traces: LlmToolTraceEntry[];
+  compact?: boolean;
+}) {
+  if (traces.length === 0) {
+    return null;
+  }
+
+  return (
+    <Stack gap={compact ? "xs" : "sm"}>
+      <Group justify="space-between" wrap="nowrap">
+        <Group gap="xs" wrap="nowrap">
+          <ThemeIcon color="teal" radius="xl" size={compact ? 30 : 34} variant="light">
+            <IconFolderSearch size={compact ? 16 : 18} />
+          </ThemeIcon>
+          <Box>
+            <Text fw={700} size={compact ? "sm" : "md"}>
+              Tool trace
+            </Text>
+            <Text c="dimmed" size="xs">
+              Filesystem tool calls made during this response.
+            </Text>
+          </Box>
+        </Group>
+        <Badge color="teal" variant="light">
+          {traces.length} call{traces.length === 1 ? "" : "s"}
+        </Badge>
+      </Group>
+
+      <Accordion chevronPosition="right" multiple radius="lg" variant="separated">
+        {traces.map((trace, index) => (
+          <Accordion.Item
+            key={`${trace.toolName}-${trace.callId ?? index}`}
+            value={`${trace.toolName}-${index}`}
+          >
+            <Accordion.Control px={compact ? "sm" : "md"} py={compact ? 10 : "sm"}>
+              <Group justify="space-between" wrap="nowrap">
+                <Group gap="xs" wrap="nowrap">
+                  <Badge color="dark" variant="filled">
+                    #{index + 1}
+                  </Badge>
+                  <Text fw={700} size="sm">
+                    {trace.toolName}
+                  </Text>
+                </Group>
+                <Group gap={6} wrap="nowrap">
+                  <Badge color="gray" variant="outline">
+                    round {trace.round}
+                  </Badge>
+                  {trace.callId ? <Code>{trace.callId}</Code> : null}
+                  <Badge color={trace.isError ? "red" : "teal"} variant="light">
+                    {trace.isError ? "error" : "success"}
+                  </Badge>
+                </Group>
+              </Group>
+            </Accordion.Control>
+            <Accordion.Panel>
+              <Stack gap="xs">
+                <Text c="dimmed" size="xs">
+                  Input
+                </Text>
+                <Box
+                  component="pre"
+                  p={compact ? "sm" : "md"}
+                  style={{
+                    margin: 0,
+                    maxHeight: compact ? 180 : 240,
+                    overflow: "auto",
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-word",
+                    borderRadius: "18px",
+                    border: "1px solid rgba(15, 23, 42, 0.08)",
+                    background: "rgba(248,250,252,0.96)",
+                    fontFamily: "var(--font-geist-mono)",
+                    fontSize: compact ? "12px" : "13px",
+                  }}
+                >
+                  {formatTracePayload(trace.input)}
+                </Box>
+
+                <Text c="dimmed" size="xs">
+                  Result
+                </Text>
+                <Box
+                  component="pre"
+                  p={compact ? "sm" : "md"}
+                  style={{
+                    margin: 0,
+                    maxHeight: compact ? 220 : 300,
+                    overflow: "auto",
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-word",
+                    borderRadius: "18px",
+                    border: "1px solid rgba(15, 23, 42, 0.08)",
+                    background: trace.isError
+                      ? "rgba(254,242,242,0.96)"
+                      : "rgba(244,251,249,0.96)",
+                    fontFamily: "var(--font-geist-mono)",
+                    fontSize: compact ? "12px" : "13px",
+                  }}
+                >
+                  {formatTracePayload(trace.result)}
+                </Box>
+              </Stack>
+            </Accordion.Panel>
+          </Accordion.Item>
+        ))}
+      </Accordion>
+    </Stack>
+  );
 }
 
 function ProviderCard({
@@ -269,6 +416,11 @@ function ChatMessage({ message }: { message: ChatBubble }) {
         <Text size="sm" style={{ whiteSpace: "pre-wrap" }}>
           {message.content}
         </Text>
+        {isAssistant && message.toolTrace && message.toolTrace.length > 0 ? (
+          <Box mt="md">
+            <ToolTracePanel compact traces={message.toolTrace} />
+          </Box>
+        ) : null}
       </Paper>
 
       {!isAssistant ? (
@@ -293,6 +445,7 @@ export default function Home() {
   const [chatMessages, setChatMessages] = useState<ChatBubble[]>([]);
   const [isSending, setIsSending] = useState(false);
   const [lastResponse, setLastResponse] = useState<LlmChatResponse | null>(null);
+  const [isFileSystemToolsEnabled, setIsFileSystemToolsEnabled] = useState(false);
 
   const currentProvider =
     providers.find((provider) => provider.provider === selectedProvider) ?? null;
@@ -426,6 +579,7 @@ export default function Home() {
           provider: currentProvider.provider,
           model: selectedModel,
           messages: requestMessages,
+          tools: isFileSystemToolsEnabled ? { fileSystem: true } : undefined,
         } satisfies LlmChatRequest),
       });
 
@@ -437,6 +591,7 @@ export default function Home() {
         content: response.text,
         provider: response.provider,
         model: response.model,
+        toolTrace: response.toolTrace,
         createdAt: new Date().toISOString(),
       };
 
@@ -666,6 +821,49 @@ export default function Home() {
                         value={systemPrompt}
                       />
 
+                      <Paper
+                        p="md"
+                        radius="xl"
+                        withBorder
+                        style={{
+                          background:
+                            "linear-gradient(180deg, rgba(244,251,249,0.98), rgba(255,255,255,0.92))",
+                          borderColor: "rgba(15, 23, 42, 0.08)",
+                        }}
+                      >
+                        <Group justify="space-between" align="flex-start" wrap="nowrap">
+                          <Group align="flex-start" wrap="nowrap">
+                            <ThemeIcon color="teal" radius="xl" variant="light">
+                              <IconFolderSearch size={18} />
+                            </ThemeIcon>
+                            <Box>
+                              <Group gap={8}>
+                                <Text fw={700} size="sm">
+                                  Filesystem tools
+                                </Text>
+                                <Badge color="teal" variant="light">
+                                  Opt-in
+                                </Badge>
+                              </Group>
+                              <Text c="dimmed" size="xs" mt={4}>
+                                Let the model inspect folders and read files
+                                through the backend tool system.
+                              </Text>
+                            </Box>
+                          </Group>
+                          <Switch
+                            checked={isFileSystemToolsEnabled}
+                            color="teal"
+                            onChange={(event) =>
+                              setIsFileSystemToolsEnabled(
+                                event.currentTarget.checked,
+                              )
+                            }
+                            size="md"
+                          />
+                        </Group>
+                      </Paper>
+
                       {currentProvider ? (
                         <Group justify="space-between" mt="xs">
                           <Button
@@ -731,6 +929,25 @@ export default function Home() {
                           Finish reason: {lastResponse.finishReason ?? "n/a"}
                         </Text>
                         <Text size="sm">{formatUsage(lastResponse)}</Text>
+                        {lastResponse.toolTrace &&
+                        lastResponse.toolTrace.length > 0 ? (
+                          <>
+                            <Text size="sm">
+                              Tool calls: {lastResponse.toolTrace.length}
+                            </Text>
+                            <Group gap={6}>
+                              {lastResponse.toolTrace.map((trace, index) => (
+                                <Badge
+                                  key={`${trace.toolName}-${trace.callId ?? index}`}
+                                  color={trace.isError ? "red" : "teal"}
+                                  variant="light"
+                                >
+                                  {trace.toolName}
+                                </Badge>
+                              ))}
+                            </Group>
+                          </>
+                        ) : null}
                       </Stack>
                     ) : (
                       <Text c="dimmed" size="sm">
@@ -762,6 +979,15 @@ export default function Home() {
                       </Text>
                     </Box>
                     <Group gap="sm">
+                      <Badge
+                        color={isFileSystemToolsEnabled ? "teal" : "gray"}
+                        leftSection={<IconFolderSearch size={12} />}
+                        variant={isFileSystemToolsEnabled ? "light" : "outline"}
+                      >
+                        {isFileSystemToolsEnabled
+                          ? "Filesystem tools on"
+                          : "Filesystem tools off"}
+                      </Badge>
                       {currentProvider?.enabled ? (
                         <Badge color="teal" leftSection={<IconCheck size={12} />}>
                           Provider ready
@@ -872,7 +1098,8 @@ export default function Home() {
                       <Group justify="space-between">
                         <Text c="dimmed" size="sm">
                           Model suggestions come from `/api/llm/providers`, but
-                          you can type any valid model id.
+                          you can type any valid model id. Turn on filesystem
+                          tools if you want the model to inspect local paths.
                         </Text>
                         <Button
                           disabled={

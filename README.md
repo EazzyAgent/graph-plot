@@ -45,7 +45,10 @@ Example request:
     { "role": "system", "content": "You are a concise coding assistant." },
     { "role": "user", "content": "Explain breadth-first search in one paragraph." }
   ],
-  "maxTokens": 300
+  "maxTokens": 300,
+  "tools": {
+    "fileSystem": true
+  }
 }
 ```
 
@@ -55,6 +58,8 @@ Provider aliases:
 - `claude` -> `anthropic`
 
 The API accepts any model string, so you can swap models without code changes. Current example model IDs in the metadata endpoint are based on the providers' official docs.
+
+When `tools.fileSystem` is `true`, the backend exposes local filesystem tools to the LLM during the chat request. The current tool set lets the model inspect a file/folder path and read a chosen text file.
 
 ## Exec API
 

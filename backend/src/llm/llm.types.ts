@@ -14,12 +14,21 @@ export interface LlmChatMessage {
   content: string;
 }
 
+export interface LlmChatToolOptions {
+  fileSystem?: boolean;
+}
+
 export interface LlmChatRequestBody {
   provider: string;
   model: string;
   messages: LlmChatMessage[];
   maxTokens?: number;
   temperature?: number;
+  tools?: LlmChatToolOptions;
+}
+
+export interface NormalizedLlmChatToolOptions {
+  fileSystem: boolean;
 }
 
 export interface NormalizedLlmChatRequest {
@@ -28,12 +37,22 @@ export interface NormalizedLlmChatRequest {
   messages: LlmChatMessage[];
   maxTokens?: number;
   temperature?: number;
+  tools: NormalizedLlmChatToolOptions;
 }
 
 export interface LlmUsage {
   inputTokens?: number;
   outputTokens?: number;
   totalTokens?: number;
+}
+
+export interface LlmToolTraceEntry {
+  round: number;
+  toolName: string;
+  input: unknown;
+  result: unknown;
+  isError: boolean;
+  callId?: string;
 }
 
 export interface LlmChatResponse {
@@ -43,6 +62,7 @@ export interface LlmChatResponse {
   text: string;
   finishReason?: string;
   usage: LlmUsage;
+  toolTrace?: LlmToolTraceEntry[];
 }
 
 export interface LlmProviderInfo {
