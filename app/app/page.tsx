@@ -22,6 +22,7 @@ import {
   Stack,
   Switch,
   Text,
+  TextInput,
   Textarea,
   ThemeIcon,
   Title,
@@ -46,6 +47,7 @@ import {
   KeyboardEvent,
   startTransition,
   useEffect,
+  useRef,
   useState,
 } from "react";
 
@@ -53,6 +55,8 @@ const apiBaseUrl =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:3001";
 
 type ProviderId = "openai" | "gemini" | "anthropic";
+const REASONING_EFFORT_OPTIONS = ["none", "low", "medium", "high"] as const;
+type ReasoningEffort = (typeof REASONING_EFFORT_OPTIONS)[number];
 
 type ProviderInfo = {
   provider: ProviderId;
@@ -74,14 +78,21 @@ type LlmChatToolOptions = {
   fileSystem?: boolean;
 };
 
+type LlmChatImageInput = {
+  mimeType: string;
+  base64Data: string;
+};
+
 type LlmChatRequest = {
   provider: string;
   model: string;
   messages: Array<{
     role: "system" | "user" | "assistant";
     content: string;
+    images?: LlmChatImageInput[];
   }>;
   maxTokens?: number;
+  reasoningEffort?: ReasoningEffort;
   tools?: LlmChatToolOptions;
 };
 
@@ -106,6 +117,169 @@ type LlmToolTraceEntry = {
   result: unknown;
   isError: boolean;
   callId?: string;
+};
+
+type ExecLogEntry = {
+  stream: "stdout" | "stderr" | "system";
+  text: string;
+  timestamp: string;
+};
+
+type ExecArtifact = {
+  kind: "image";
+  filename: string;
+  mimeType: string;
+  base64: string;
+  byteSize: number;
+};
+
+type ExecPlotFigureLayoutDiagnostics = {
+  filename: string;
+  widthPx: number;
+  heightPx: number;
+  axesCount: number;
+  textElementCount: number;
+  visibleTextElementCount: number;
+  clippedTextCount: number;
+  overlappingTextPairCount: number;
+  verySmallTextCount: number;
+  minFontSize?: number;
+  maxFontSize?: number;
+  averageFontSize?: number;
+};
+
+type ExecPlotLayoutDiagnostics = {
+  totalFigureCount: number;
+  totalAxesCount: number;
+  totalTextElementCount: number;
+  totalVisibleTextElementCount: number;
+  totalClippedTextCount: number;
+  totalOverlappingTextPairCount: number;
+  totalVerySmallTextCount: number;
+  figures: ExecPlotFigureLayoutDiagnostics[];
+};
+
+type ExecPlotSandboxStatus = {
+  available: boolean;
+  bootstrapped: boolean;
+  command?: string;
+  packageDirectory: string;
+  requiredPackages: string[];
+};
+
+type ExecPlotCapabilitiesResponse = {
+  os: string;
+  sandbox: ExecPlotSandboxStatus;
+};
+
+type ExecPlotResponse = {
+  requestedRuntime: "python";
+  resolvedRuntime: "python";
+  os: string;
+  renderProfile: "draft" | "final";
+  command: string;
+  commandArgs: string[];
+  workingDirectory: string;
+  startedAt: string;
+  completedAt: string;
+  durationMs: number;
+  status: "completed" | "failed" | "timed_out";
+  exitCode: number | null;
+  signal: string | null;
+  stdout: string;
+  stderr: string;
+  logs: ExecLogEntry[];
+  errors: string[];
+  sandbox: ExecPlotSandboxStatus;
+  artifacts: ExecArtifact[];
+  layoutDiagnostics?: ExecPlotLayoutDiagnostics;
+};
+
+type ExecPlotWorkflowStatus = "queued" | "running" | "completed" | "failed";
+type ExecPlotWorkflowStepStatus = "running" | "completed" | "failed";
+
+type StartExecPlotWorkflowResponse = {
+  jobId: string;
+  status: "queued" | "running";
+};
+
+type ExecPlotWorkflowRequest = {
+  provider: string;
+  model: string;
+  reviewModel?: string;
+  prompt: string;
+  contextPath?: string;
+  enableFileSystemTools?: boolean;
+  reasoningEffort?: ReasoningEffort;
+};
+
+type ExecPlotWorkflowLlmDetails = {
+  provider: string;
+  model: string;
+  responseId?: string;
+  finishReason?: string;
+  text: string;
+  usage: {
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+  };
+  toolTrace?: LlmToolTraceEntry[];
+  parsed?: unknown;
+};
+
+type ExecPlotWorkflowLlmStep = {
+  id: string;
+  kind: "llm";
+  label: string;
+  attempt: number;
+  status: ExecPlotWorkflowStepStatus;
+  startedAt: string;
+  completedAt?: string;
+  error?: string;
+  llm?: ExecPlotWorkflowLlmDetails;
+};
+
+type ExecPlotWorkflowExecStep = {
+  id: string;
+  kind: "exec";
+  label: string;
+  attempt: number;
+  status: ExecPlotWorkflowStepStatus;
+  startedAt: string;
+  completedAt?: string;
+  error?: string;
+  exec?: ExecPlotResponse;
+};
+
+type ExecPlotWorkflowStep =
+  | ExecPlotWorkflowLlmStep
+  | ExecPlotWorkflowExecStep;
+
+type ExecPlotWorkflowJob = {
+  jobId: string;
+  status: ExecPlotWorkflowStatus;
+  currentStage: string;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  request: {
+    provider: string;
+    model: string;
+    reviewModel?: string;
+    prompt: string;
+    contextPath?: string;
+    enableFileSystemTools: boolean;
+    reasoningEffort?: ReasoningEffort;
+  };
+  draftCode: string;
+  finalCode: string;
+  critique: string;
+  reflection: string;
+  draftArtifacts: ExecArtifact[];
+  finalArtifacts: ExecArtifact[];
+  steps: ExecPlotWorkflowStep[];
+  terminalError?: string;
 };
 
 type ChatBubble = {
@@ -186,6 +360,55 @@ function formatTracePayload(value: unknown): string {
     return JSON.stringify(value, null, 2);
   } catch {
     return String(value);
+  }
+}
+
+function formatBytes(byteSize: number): string {
+  if (byteSize < 1024) {
+    return `${byteSize} B`;
+  }
+
+  if (byteSize < 1024 * 1024) {
+    return `${(byteSize / 1024).toFixed(1)} KB`;
+  }
+
+  return `${(byteSize / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function isPlotWorkflowRunning(status: ExecPlotWorkflowStatus | null | undefined) {
+  return status === "queued" || status === "running";
+}
+
+function isWorkflowLlmStep(
+  step: ExecPlotWorkflowStep,
+): step is ExecPlotWorkflowLlmStep {
+  return step.kind === "llm";
+}
+
+function formatWorkflowStepLogs(execution: ExecPlotResponse): string {
+  if (execution.logs.length > 0) {
+    return execution.logs
+      .map((log) => `[${log.stream}] ${log.text}`.trimEnd())
+      .join("\n");
+  }
+
+  const fallbacks = [execution.stderr.trim(), execution.stdout.trim()]
+    .filter(Boolean)
+    .join("\n\n");
+
+  return fallbacks || "No logs captured.";
+}
+
+function workflowStatusColor(status: ExecPlotWorkflowStatus): string {
+  switch (status) {
+    case "queued":
+      return "gray";
+    case "running":
+      return "blue";
+    case "completed":
+      return "teal";
+    case "failed":
+      return "red";
   }
 }
 
@@ -432,12 +655,211 @@ function ChatMessage({ message }: { message: ChatBubble }) {
   );
 }
 
+function WorkflowStepDetails({ step }: { step: ExecPlotWorkflowStep }) {
+  if (isWorkflowLlmStep(step)) {
+    return (
+      <Stack gap="md">
+        <Group gap="xs">
+          <Badge color="dark" variant="light">
+            LLM
+          </Badge>
+          <Badge
+            color={
+              step.status === "completed"
+                ? "teal"
+                : step.status === "running"
+                  ? "blue"
+                  : "red"
+            }
+          >
+            {step.status}
+          </Badge>
+          <Badge color="gray" variant="outline">
+            attempt {step.attempt}
+          </Badge>
+          {step.llm?.provider ? (
+            <Badge color="gray" variant="outline">
+              {step.llm.provider}
+            </Badge>
+          ) : null}
+          {step.llm?.model ? <Code>{step.llm.model}</Code> : null}
+        </Group>
+
+        {step.error ? (
+          <Alert color="red" icon={<IconAlertCircle size={16} />} radius="lg">
+            {step.error}
+          </Alert>
+        ) : null}
+
+        {typeof step.llm?.parsed !== "undefined" ? (
+          <Box>
+            <Text c="dimmed" size="xs" mb={6}>
+              Parsed output
+            </Text>
+            <Box
+              component="pre"
+              p="md"
+              style={{
+                margin: 0,
+                maxHeight: 260,
+                overflow: "auto",
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+                borderRadius: "20px",
+                background: "rgba(248,250,252,0.96)",
+                border: "1px solid rgba(15, 23, 42, 0.08)",
+                fontFamily: "var(--font-geist-mono)",
+                fontSize: "13px",
+              }}
+            >
+              {formatTracePayload(step.llm.parsed)}
+            </Box>
+          </Box>
+        ) : null}
+
+        {step.llm?.text ? (
+          <Box>
+            <Text c="dimmed" size="xs" mb={6}>
+              Raw model response
+            </Text>
+            <Box
+              component="pre"
+              p="md"
+              style={{
+                margin: 0,
+                maxHeight: 320,
+                overflow: "auto",
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+                borderRadius: "20px",
+                background: "rgba(248,250,252,0.96)",
+                border: "1px solid rgba(15, 23, 42, 0.08)",
+                fontFamily: "var(--font-geist-mono)",
+                fontSize: "13px",
+              }}
+            >
+              {step.llm.text}
+            </Box>
+          </Box>
+        ) : null}
+
+        {step.llm?.toolTrace && step.llm.toolTrace.length > 0 ? (
+          <ToolTracePanel traces={step.llm.toolTrace} />
+        ) : null}
+      </Stack>
+    );
+  }
+
+  const execution = step.exec;
+
+  return (
+    <Stack gap="md">
+      <Group gap="xs">
+        <Badge color="dark" variant="light">
+          EXEC
+        </Badge>
+        <Badge
+          color={
+            step.status === "completed"
+              ? "teal"
+              : step.status === "running"
+                ? "blue"
+                : "red"
+          }
+        >
+          {step.status}
+        </Badge>
+        <Badge color="gray" variant="outline">
+          attempt {step.attempt}
+        </Badge>
+        {execution?.renderProfile ? (
+          <Badge color={execution.renderProfile === "draft" ? "cyan" : "teal"} variant="light">
+            {execution.renderProfile}
+          </Badge>
+        ) : null}
+      </Group>
+
+      {step.error ? (
+        <Alert color="red" icon={<IconAlertCircle size={16} />} radius="lg">
+          {step.error}
+        </Alert>
+      ) : null}
+
+      {execution ? (
+        <>
+          <Group gap="xs">
+            <Badge color="gray" variant="outline">
+              {execution.durationMs} ms
+            </Badge>
+            <Badge color="dark" variant="outline">
+              {execution.command}
+            </Badge>
+            {execution.exitCode !== null ? (
+              <Badge color="gray" variant="outline">
+                exit {execution.exitCode}
+              </Badge>
+            ) : null}
+          </Group>
+
+          <Box
+            component="pre"
+            p="md"
+            style={{
+              margin: 0,
+              maxHeight: 320,
+              overflow: "auto",
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-word",
+              borderRadius: "20px",
+              background: "rgba(248,250,252,0.96)",
+              border: "1px solid rgba(15, 23, 42, 0.08)",
+              fontFamily: "var(--font-geist-mono)",
+              fontSize: "13px",
+            }}
+          >
+            {formatWorkflowStepLogs(execution)}
+          </Box>
+
+          {execution.layoutDiagnostics ? (
+            <Box>
+              <Text c="dimmed" size="xs" mb={6}>
+                Layout diagnostics
+              </Text>
+              <Box
+                component="pre"
+                p="md"
+                style={{
+                  margin: 0,
+                  maxHeight: 260,
+                  overflow: "auto",
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                  borderRadius: "20px",
+                  background: "rgba(248,250,252,0.96)",
+                  border: "1px solid rgba(15, 23, 42, 0.08)",
+                  fontFamily: "var(--font-geist-mono)",
+                  fontSize: "13px",
+                }}
+              >
+                {formatTracePayload(execution.layoutDiagnostics)}
+              </Box>
+            </Box>
+          ) : null}
+        </>
+      ) : null}
+    </Stack>
+  );
+}
+
 export default function Home() {
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [providersLoading, setProvidersLoading] = useState(true);
   const [providersError, setProvidersError] = useState<string | null>(null);
   const [selectedProvider, setSelectedProvider] = useState<ProviderId>("openai");
   const [model, setModel] = useState("gpt-5.4");
+  const [reviewModel, setReviewModel] = useState("");
+  const [reasoningEffort, setReasoningEffort] =
+    useState<ReasoningEffort>("medium");
   const [systemPrompt, setSystemPrompt] = useState(
     "You are a precise assistant helping with graph-plot related questions.",
   );
@@ -446,6 +868,20 @@ export default function Home() {
   const [isSending, setIsSending] = useState(false);
   const [lastResponse, setLastResponse] = useState<LlmChatResponse | null>(null);
   const [isFileSystemToolsEnabled, setIsFileSystemToolsEnabled] = useState(false);
+  const [plotPrompt, setPlotPrompt] = useState("");
+  const [plotContextPath, setPlotContextPath] = useState("");
+  const [isPlotFileToolsEnabled, setIsPlotFileToolsEnabled] = useState(true);
+  const [plotWorkflowJobId, setPlotWorkflowJobId] = useState<string | null>(null);
+  const [plotWorkflowJob, setPlotWorkflowJob] =
+    useState<ExecPlotWorkflowJob | null>(null);
+  const [plotWorkflowError, setPlotWorkflowError] = useState<string | null>(null);
+  const [plotCapabilities, setPlotCapabilities] =
+    useState<ExecPlotCapabilitiesResponse | null>(null);
+  const [plotCapabilitiesError, setPlotCapabilitiesError] = useState<string | null>(
+    null,
+  );
+  const [isGeneratingPlot, setIsGeneratingPlot] = useState(false);
+  const notifiedPlotWorkflowStatusRef = useRef<string | null>(null);
 
   const currentProvider =
     providers.find((provider) => provider.provider === selectedProvider) ?? null;
@@ -479,6 +915,7 @@ export default function Home() {
           ? currentModel
           : selected.defaultModel,
       );
+      setReviewModel("");
     } catch (error) {
       const message =
         error instanceof Error
@@ -497,15 +934,213 @@ export default function Home() {
     }
   }
 
+  async function loadPlotCapabilities() {
+    setPlotCapabilitiesError(null);
+
+    try {
+      const response = await fetchJson<ExecPlotCapabilitiesResponse>(
+        "/api/exec/plot/capabilities",
+        {
+          cache: "no-store",
+        },
+      );
+
+      setPlotCapabilities(response);
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Unable to load plotting sandbox status.";
+
+      setPlotCapabilities(null);
+      setPlotCapabilitiesError(message);
+    }
+  }
+
   useEffect(() => {
     void loadProviders();
+    void loadPlotCapabilities();
     // This is a one-time bootstrap fetch; user-triggered refreshes use the same function.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    if (!plotWorkflowJobId) {
+      return;
+    }
+
+    let cancelled = false;
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+
+    const pollWorkflow = async () => {
+      try {
+        const workflowJob = await fetchJson<ExecPlotWorkflowJob>(
+          `/api/exec/plot/workflows/${plotWorkflowJobId}`,
+          {
+            cache: "no-store",
+          },
+        );
+
+        if (cancelled) {
+          return;
+        }
+
+        setPlotWorkflowJob(workflowJob);
+        setIsGeneratingPlot(isPlotWorkflowRunning(workflowJob.status));
+        setPlotWorkflowError(null);
+
+        if (workflowJob.status === "completed" || workflowJob.status === "failed") {
+          const notificationKey = `${workflowJob.jobId}:${workflowJob.status}`;
+
+          if (notifiedPlotWorkflowStatusRef.current !== notificationKey) {
+            notifications.show({
+              title:
+                workflowJob.status === "completed"
+                  ? "Final figure ready"
+                  : "Figure workflow failed",
+              message:
+                workflowJob.status === "completed"
+                  ? `Generated ${workflowJob.finalArtifacts.length} final figure${workflowJob.finalArtifacts.length === 1 ? "" : "s"} from the backend workflow.`
+                  : workflowJob.terminalError ?? "The plotting workflow failed.",
+              color: workflowJob.status === "completed" ? "teal" : "red",
+            });
+            notifiedPlotWorkflowStatusRef.current = notificationKey;
+          }
+
+          return;
+        }
+
+        timeoutHandle = setTimeout(() => {
+          void pollWorkflow();
+        }, 1500);
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Unable to poll the plot workflow status.";
+
+        setPlotWorkflowError(message);
+        setIsGeneratingPlot(false);
+        notifications.show({
+          title: "Plot workflow polling failed",
+          message,
+          color: "red",
+        });
+      }
+    };
+
+    void pollWorkflow();
+
+    return () => {
+      cancelled = true;
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+    };
+  }, [plotWorkflowJobId]);
+
   function handleProviderSelect(provider: ProviderInfo) {
     setSelectedProvider(provider.provider);
     setModel(provider.defaultModel);
+    setReviewModel("");
+  }
+
+  async function generateFigure() {
+    const prompt = plotPrompt.trim();
+    const selectedModel = model.trim();
+    const selectedReviewModel = reviewModel.trim();
+
+    if (!currentProvider) {
+      notifications.show({
+        title: "No provider selected",
+        message: "Load provider metadata before generating a figure.",
+        color: "red",
+      });
+      return;
+    }
+
+    if (!currentProvider.enabled) {
+      notifications.show({
+        title: "Provider unavailable",
+        message: `Set ${currentProvider.apiKeyEnv} in the backend before generating a figure with ${currentProvider.displayName}.`,
+        color: "orange",
+      });
+      return;
+    }
+
+    if (!prompt) {
+      notifications.show({
+        title: "Prompt required",
+        message: "Describe the figure you want before generating it.",
+        color: "orange",
+      });
+      return;
+    }
+
+    if (!selectedModel) {
+      notifications.show({
+        title: "Model required",
+        message: "Choose or type a model name before generating a figure.",
+        color: "orange",
+      });
+      return;
+    }
+
+    setIsGeneratingPlot(true);
+    setPlotWorkflowError(null);
+    setPlotWorkflowJob(null);
+    setPlotWorkflowJobId(null);
+    notifiedPlotWorkflowStatusRef.current = null;
+    let workflowStarted = false;
+
+    try {
+      const contextPath = plotContextPath.trim();
+      const startedWorkflow = await fetchJson<StartExecPlotWorkflowResponse>(
+        "/api/exec/plot/workflows",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            provider: currentProvider.provider,
+            model: selectedModel,
+            reviewModel: selectedReviewModel || undefined,
+            prompt,
+            contextPath: contextPath || undefined,
+            enableFileSystemTools: isPlotFileToolsEnabled,
+            reasoningEffort,
+          } satisfies ExecPlotWorkflowRequest),
+        },
+      );
+
+      workflowStarted = true;
+      setPlotWorkflowJobId(startedWorkflow.jobId);
+
+      notifications.show({
+        title: "Plot workflow started",
+        message: `Started backend workflow ${startedWorkflow.jobId.slice(0, 8)}...`,
+        color: "teal",
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Unable to start the plot workflow.";
+
+      notifications.show({
+        title: "Figure generation failed",
+        message,
+        color: "red",
+      });
+      setPlotWorkflowError(message);
+      setIsGeneratingPlot(false);
+    } finally {
+      if (!workflowStarted) {
+        setIsGeneratingPlot(false);
+      }
+    }
   }
 
   async function submitPrompt() {
@@ -579,6 +1214,7 @@ export default function Home() {
           provider: currentProvider.provider,
           model: selectedModel,
           messages: requestMessages,
+          reasoningEffort,
           tools: isFileSystemToolsEnabled ? { fileSystem: true } : undefined,
         } satisfies LlmChatRequest),
       });
@@ -628,6 +1264,22 @@ export default function Home() {
       void submitPrompt();
     }
   }
+
+  const plotWorkflowSteps = plotWorkflowJob?.steps ?? [];
+  const draftArtifacts = plotWorkflowJob?.draftArtifacts ?? [];
+  const finalArtifacts = plotWorkflowJob?.finalArtifacts ?? [];
+  const plotWorkflowHasDetails = Boolean(
+    plotWorkflowJob &&
+      (
+        plotWorkflowSteps.length > 0 ||
+        draftArtifacts.length > 0 ||
+        finalArtifacts.length > 0 ||
+        plotWorkflowJob.draftCode ||
+        plotWorkflowJob.finalCode ||
+        plotWorkflowJob.critique ||
+        plotWorkflowJob.reflection
+      ),
+  );
 
   return (
     <AppShell
@@ -807,6 +1459,29 @@ export default function Home() {
                         placeholder="Type or choose a model"
                         radius="xl"
                         value={model}
+                      />
+
+                      <Autocomplete
+                        data={[...REASONING_EFFORT_OPTIONS]}
+                        label="Reasoning effort"
+                        onChange={(value) => {
+                          const normalized = value.trim().toLowerCase();
+                          if (
+                            REASONING_EFFORT_OPTIONS.includes(
+                              normalized as ReasoningEffort,
+                            )
+                          ) {
+                            setReasoningEffort(normalized as ReasoningEffort);
+                            return;
+                          }
+
+                          if (!normalized) {
+                            setReasoningEffort("medium");
+                          }
+                        }}
+                        placeholder="none, low, medium, or high"
+                        radius="xl"
+                        value={reasoningEffort}
                       />
 
                       <Textarea
@@ -1120,6 +1795,590 @@ export default function Home() {
                 </Paper>
               </Grid.Col>
             </Grid>
+
+            <Paper
+              p="xl"
+              radius="32px"
+              shadow="xl"
+              style={{
+                background:
+                  "linear-gradient(160deg, rgba(255,255,255,0.92), rgba(240,249,255,0.78))",
+                backdropFilter: "blur(18px)",
+              }}
+            >
+              <Stack gap="xl">
+                <Group justify="space-between" align="flex-start">
+                  <Box>
+                    <Badge color="cyan" variant="light" style={{ width: "fit-content" }}>
+                      Figure Lab
+                    </Badge>
+                    <Title mt="sm" order={2}>
+                      Run a draft, critique it, diagnose layout issues, and iterate to the final figure.
+                    </Title>
+                    <Text c="dimmed" maw={760} mt="xs">
+                      The backend now owns the full plot workflow: draft codegen,
+                      draft render, repeated LLM repair on failed execution,
+                      critique/revision, final render, matplotlib layout diagnostics,
+                      and recursive review-driven rerenders. The UI starts a job,
+                      polls it, and renders the full attempt timeline.
+                    </Text>
+                  </Box>
+                  <Group gap="xs">
+                    <Badge color="dark" variant="light">
+                      {currentProvider?.displayName ?? "No provider"}
+                    </Badge>
+                    <Badge color="gray" variant="outline">
+                      {model || "no model"}
+                    </Badge>
+                    <Badge color="dark" variant="outline">
+                      review {reviewModel.trim() || model || "same model"}
+                    </Badge>
+                    <Badge color="grape" variant="light">
+                      reasoning {reasoningEffort}
+                    </Badge>
+                    <Badge
+                      color={isPlotFileToolsEnabled ? "teal" : "gray"}
+                      leftSection={<IconFolderSearch size={12} />}
+                      variant={isPlotFileToolsEnabled ? "light" : "outline"}
+                    >
+                      {isPlotFileToolsEnabled ? "LLM file tools on" : "LLM file tools off"}
+                    </Badge>
+                    <Badge
+                      color={
+                        plotCapabilities?.sandbox.available
+                          ? plotCapabilities.sandbox.bootstrapped
+                            ? "teal"
+                            : "orange"
+                          : "red"
+                      }
+                      variant="light"
+                    >
+                      {plotCapabilities?.sandbox.available
+                        ? plotCapabilities.sandbox.bootstrapped
+                          ? "Sandbox ready"
+                          : "Bootstrap on first run"
+                        : "Python missing"}
+                    </Badge>
+                    {plotWorkflowJob ? (
+                      <Badge
+                        color={workflowStatusColor(plotWorkflowJob.status)}
+                        variant="light"
+                      >
+                        {plotWorkflowJob.status}
+                      </Badge>
+                    ) : null}
+                  </Group>
+                </Group>
+
+                <Grid gutter="xl">
+                  <Grid.Col span={{ base: 12, lg: 5 }}>
+                    <Stack gap="md">
+                      {plotCapabilitiesError ? (
+                        <Alert
+                          color="red"
+                          icon={<IconAlertCircle size={16} />}
+                          radius="xl"
+                        >
+                          {plotCapabilitiesError}
+                        </Alert>
+                      ) : null}
+
+                      <Textarea
+                        autosize
+                        label="Figure request"
+                        minRows={6}
+                        onChange={(event) => setPlotPrompt(event.currentTarget.value)}
+                        placeholder="Example: Plot a smooth sine and cosine curve with labeled axes, legend, and a clean presentation style."
+                        radius="xl"
+                        value={plotPrompt}
+                      />
+
+                      <TextInput
+                        label="Local data path"
+                        onChange={(event) =>
+                          setPlotContextPath(event.currentTarget.value)
+                        }
+                        placeholder="Optional: C:\\data\\sales.csv or /Users/me/project/data"
+                        radius="xl"
+                        value={plotContextPath}
+                      />
+
+                      <Autocomplete
+                        data={currentProvider?.exampleModels ?? []}
+                        description="Optional: leave blank to reuse the primary model for critique, repair, and final review."
+                        label="Review model"
+                        onChange={setReviewModel}
+                        placeholder="Optional stronger reviewer model"
+                        radius="xl"
+                        value={reviewModel}
+                      />
+
+                      <Paper
+                        p="md"
+                        radius="xl"
+                        withBorder
+                        style={{
+                          background:
+                            "linear-gradient(180deg, rgba(244,251,249,0.98), rgba(255,255,255,0.92))",
+                          borderColor: "rgba(15, 23, 42, 0.08)",
+                        }}
+                      >
+                        <Group justify="space-between" align="flex-start" wrap="nowrap">
+                          <Group align="flex-start" wrap="nowrap">
+                            <ThemeIcon color="teal" radius="xl" variant="light">
+                              <IconFolderSearch size={18} />
+                            </ThemeIcon>
+                            <Box>
+                              <Group gap={8}>
+                                <Text fw={700} size="sm">
+                                  LLM filesystem inspection
+                                </Text>
+                                <Badge color="teal" variant="light">
+                                  Recommended
+                                </Badge>
+                              </Group>
+                              <Text c="dimmed" size="xs" mt={4}>
+                                Let the model inspect directories and read files
+                                before it writes plotting code.
+                              </Text>
+                            </Box>
+                          </Group>
+                          <Switch
+                            checked={isPlotFileToolsEnabled}
+                            color="teal"
+                            onChange={(event) =>
+                              setIsPlotFileToolsEnabled(
+                                event.currentTarget.checked,
+                              )
+                            }
+                            size="md"
+                          />
+                        </Group>
+                      </Paper>
+
+                      <Paper
+                        p="md"
+                        radius="xl"
+                        withBorder
+                        style={{
+                          background:
+                            "linear-gradient(180deg, rgba(248,250,252,0.96), rgba(255,255,255,0.94))",
+                        }}
+                      >
+                        <Stack gap="xs">
+                          <Text fw={700} size="sm">
+                            Plot sandbox
+                          </Text>
+                          <Text c="dimmed" size="xs">
+                            Python packages:{" "}
+                            {plotCapabilities?.sandbox.requiredPackages.join(", ") ??
+                              "matplotlib, numpy, pandas, seaborn"}
+                          </Text>
+                          <Text c="dimmed" size="xs">
+                            Runtime command:{" "}
+                            {plotCapabilities?.sandbox.command ?? "Not detected yet"}
+                          </Text>
+                          <Text c="dimmed" size="xs">
+                            Package directory:{" "}
+                            {plotCapabilities?.sandbox.packageDirectory ??
+                              "Loading sandbox status..."}
+                          </Text>
+                        </Stack>
+                      </Paper>
+
+                      {plotWorkflowJob ? (
+                        <Paper
+                          p="md"
+                          radius="xl"
+                          withBorder
+                          style={{
+                            background:
+                              "linear-gradient(180deg, rgba(248,250,252,0.96), rgba(255,255,255,0.94))",
+                          }}
+                        >
+                          <Stack gap="xs">
+                            <Text fw={700} size="sm">
+                              Workflow status
+                            </Text>
+                            <Group gap="xs">
+                              <Badge
+                                color={workflowStatusColor(plotWorkflowJob.status)}
+                                variant="light"
+                              >
+                                {plotWorkflowJob.status}
+                              </Badge>
+                              <Code>{plotWorkflowJob.jobId}</Code>
+                            </Group>
+                            <Text c="dimmed" size="xs">
+                              Current stage: {plotWorkflowJob.currentStage}
+                            </Text>
+                          </Stack>
+                        </Paper>
+                      ) : null}
+
+                      {plotWorkflowError || plotWorkflowJob?.terminalError ? (
+                        <Alert
+                          color="red"
+                          icon={<IconAlertCircle size={16} />}
+                          radius="xl"
+                        >
+                          {plotWorkflowError ??
+                            plotWorkflowJob?.terminalError ??
+                            "The plotting workflow failed."}
+                        </Alert>
+                      ) : null}
+
+                      <Group justify="space-between">
+                        <Text c="dimmed" size="sm">
+                          Filesystem tools are passed into the backend workflow.
+                          Failed execution stages trigger repeated LLM reflection
+                          with the current code, sandbox feedback, and layout
+                          diagnostics before the workflow moves on or stops.
+                        </Text>
+                        <Button
+                          disabled={
+                            isGeneratingPlot ||
+                            !plotPrompt.trim() ||
+                            !model.trim() ||
+                            !currentProvider?.enabled
+                          }
+                          leftSection={<IconSparkles size={16} />}
+                          onClick={() => void generateFigure()}
+                          radius="xl"
+                        >
+                          {isGeneratingPlot ? "Generating..." : "Generate figure"}
+                        </Button>
+                      </Group>
+                    </Stack>
+                  </Grid.Col>
+
+                  <Grid.Col span={{ base: 12, lg: 7 }}>
+                    {finalArtifacts.length || draftArtifacts.length ? (
+                      <Stack gap="md">
+                        {finalArtifacts.length ? (
+                          <Stack gap="md">
+                            <Group justify="space-between">
+                              <Text fw={800} size="lg">
+                                Final figure
+                              </Text>
+                              <Badge color="teal" variant="light">
+                                Final render
+                              </Badge>
+                            </Group>
+                            {finalArtifacts.map((artifact) => {
+                              const artifactUrl = `data:${artifact.mimeType};base64,${artifact.base64}`;
+
+                              return (
+                                <Paper
+                                  key={`final-${artifact.filename}`}
+                                  p="md"
+                                  radius="28px"
+                                  shadow="md"
+                                  withBorder
+                                  style={{ background: "rgba(255,255,255,0.9)" }}
+                                >
+                                  <Stack gap="md">
+                                    <Box
+                                      component="img"
+                                      alt={artifact.filename}
+                                      src={artifactUrl}
+                                      style={{
+                                        width: "100%",
+                                        display: "block",
+                                        borderRadius: "20px",
+                                        border: "1px solid rgba(15, 23, 42, 0.08)",
+                                        background: "white",
+                                      }}
+                                    />
+                                    <Group justify="space-between">
+                                      <Box>
+                                        <Text fw={700} size="sm">
+                                          {artifact.filename}
+                                        </Text>
+                                        <Text c="dimmed" size="xs">
+                                          {artifact.mimeType} · {formatBytes(artifact.byteSize)}
+                                        </Text>
+                                      </Box>
+                                      <Button
+                                        component="a"
+                                        download={artifact.filename}
+                                        href={artifactUrl}
+                                        leftSection={<IconArrowUpRight size={16} />}
+                                        radius="xl"
+                                        variant="light"
+                                      >
+                                        Download
+                                      </Button>
+                                    </Group>
+                                  </Stack>
+                                </Paper>
+                              );
+                            })}
+                          </Stack>
+                        ) : null}
+
+                        {draftArtifacts.length ? (
+                          <Stack gap="md">
+                            <Group justify="space-between">
+                              <Text fw={800} size="lg">
+                                Draft figure
+                              </Text>
+                              <Badge color="cyan" variant="light">
+                                Draft low-res render
+                              </Badge>
+                            </Group>
+                            {draftArtifacts.map((artifact) => {
+                              const artifactUrl = `data:${artifact.mimeType};base64,${artifact.base64}`;
+
+                              return (
+                                <Paper
+                                  key={`draft-${artifact.filename}`}
+                                  p="md"
+                                  radius="28px"
+                                  shadow="sm"
+                                  withBorder
+                                  style={{ background: "rgba(255,255,255,0.78)" }}
+                                >
+                                  <Stack gap="md">
+                                    <Box
+                                      component="img"
+                                      alt={artifact.filename}
+                                      src={artifactUrl}
+                                      style={{
+                                        width: "100%",
+                                        display: "block",
+                                        borderRadius: "20px",
+                                        border: "1px solid rgba(15, 23, 42, 0.08)",
+                                        background: "white",
+                                      }}
+                                    />
+                                    <Group justify="space-between">
+                                      <Box>
+                                        <Text fw={700} size="sm">
+                                          {artifact.filename}
+                                        </Text>
+                                        <Text c="dimmed" size="xs">
+                                          {artifact.mimeType} · {formatBytes(artifact.byteSize)}
+                                        </Text>
+                                      </Box>
+                                      <Button
+                                        component="a"
+                                        download={artifact.filename}
+                                        href={artifactUrl}
+                                        leftSection={<IconArrowUpRight size={16} />}
+                                        radius="xl"
+                                        variant="subtle"
+                                      >
+                                        Download draft
+                                      </Button>
+                                    </Group>
+                                  </Stack>
+                                </Paper>
+                              );
+                            })}
+                          </Stack>
+                        ) : null}
+                      </Stack>
+                    ) : plotWorkflowJob && isPlotWorkflowRunning(plotWorkflowJob.status) ? (
+                      <Paper
+                        p="xl"
+                        radius="28px"
+                        withBorder
+                        style={{
+                          minHeight: 360,
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          background:
+                            "linear-gradient(180deg, rgba(245,252,255,0.92), rgba(255,255,255,0.88))",
+                        }}
+                      >
+                        <Stack align="center" gap="sm">
+                          <Loader size="lg" />
+                          <Text fw={700}>Workflow running</Text>
+                          <Text c="dimmed" maw={420} ta="center">
+                            {plotWorkflowJob.currentStage}
+                          </Text>
+                        </Stack>
+                      </Paper>
+                    ) : (
+                      <Paper
+                        p="xl"
+                        radius="28px"
+                        withBorder
+                        style={{
+                          minHeight: 360,
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          background:
+                            "linear-gradient(180deg, rgba(245,252,255,0.92), rgba(255,255,255,0.88))",
+                          borderStyle: "dashed",
+                        }}
+                      >
+                        <Stack align="center" gap="sm">
+                          <ThemeIcon
+                            color="brand"
+                            radius="xl"
+                            size={52}
+                            variant="light"
+                          >
+                            <IconBrain size={24} />
+                          </ThemeIcon>
+                          <Text fw={700}>No figure yet</Text>
+                          <Text c="dimmed" maw={420} ta="center">
+                            Describe the chart you want, then let the selected
+                            model generate a draft, critique it, and render the
+                            final output here.
+                          </Text>
+                        </Stack>
+                      </Paper>
+                    )}
+                  </Grid.Col>
+                </Grid>
+
+                {plotWorkflowHasDetails ? (
+                  <Accordion chevronPosition="right" multiple radius="xl" variant="separated">
+                    <Accordion.Item value="draft-code">
+                      <Accordion.Control>
+                        <Text fw={700}>Draft Python code</Text>
+                      </Accordion.Control>
+                      <Accordion.Panel>
+                        <Box
+                          component="pre"
+                          p="md"
+                          style={{
+                            margin: 0,
+                            maxHeight: 360,
+                            overflow: "auto",
+                            whiteSpace: "pre-wrap",
+                            wordBreak: "break-word",
+                            borderRadius: "20px",
+                            background: "rgba(248,250,252,0.96)",
+                            border: "1px solid rgba(15, 23, 42, 0.08)",
+                            fontFamily: "var(--font-geist-mono)",
+                            fontSize: "13px",
+                          }}
+                        >
+                          {plotWorkflowJob?.draftCode || "No draft code generated yet."}
+                        </Box>
+                      </Accordion.Panel>
+                    </Accordion.Item>
+
+                    <Accordion.Item value="critique-reflection">
+                      <Accordion.Control>
+                        <Text fw={700}>Critique and reflection</Text>
+                      </Accordion.Control>
+                      <Accordion.Panel>
+                        {plotWorkflowJob?.critique || plotWorkflowJob?.reflection ? (
+                          <Stack gap="md">
+                            <Box>
+                              <Text c="dimmed" size="xs" mb={6}>
+                                Critique
+                              </Text>
+                              <Text size="sm" style={{ whiteSpace: "pre-wrap" }}>
+                                {plotWorkflowJob?.critique || "No critique text returned."}
+                              </Text>
+                            </Box>
+                            <Box>
+                              <Text c="dimmed" size="xs" mb={6}>
+                                Reflection
+                              </Text>
+                              <Text size="sm" style={{ whiteSpace: "pre-wrap" }}>
+                                {plotWorkflowJob?.reflection ||
+                                  "No reflection text returned."}
+                              </Text>
+                            </Box>
+                          </Stack>
+                        ) : (
+                          <Text c="dimmed" size="sm">
+                            The critique pass has not produced reflection notes yet.
+                          </Text>
+                        )}
+                      </Accordion.Panel>
+                    </Accordion.Item>
+
+                    <Accordion.Item value="final-code">
+                      <Accordion.Control>
+                        <Text fw={700}>Final revised Python code</Text>
+                      </Accordion.Control>
+                      <Accordion.Panel>
+                        <Box
+                          component="pre"
+                          p="md"
+                          style={{
+                            margin: 0,
+                            maxHeight: 360,
+                            overflow: "auto",
+                            whiteSpace: "pre-wrap",
+                            wordBreak: "break-word",
+                            borderRadius: "20px",
+                            background: "rgba(248,250,252,0.96)",
+                            border: "1px solid rgba(15, 23, 42, 0.08)",
+                            fontFamily: "var(--font-geist-mono)",
+                            fontSize: "13px",
+                          }}
+                        >
+                          {plotWorkflowJob?.finalCode || "No revised code generated yet."}
+                        </Box>
+                      </Accordion.Panel>
+                    </Accordion.Item>
+
+                    <Accordion.Item value="workflow-timeline">
+                      <Accordion.Control>
+                        <Text fw={700}>Workflow timeline</Text>
+                      </Accordion.Control>
+                      <Accordion.Panel>
+                        {plotWorkflowSteps.length > 0 ? (
+                          <Accordion chevronPosition="right" multiple radius="xl" variant="separated">
+                            {plotWorkflowSteps.map((step) => (
+                              <Accordion.Item key={step.id} value={step.id}>
+                                <Accordion.Control>
+                                  <Group justify="space-between" wrap="nowrap">
+                                    <Group gap="xs" wrap="nowrap">
+                                      <Badge color="dark" variant="light">
+                                        {step.kind.toUpperCase()}
+                                      </Badge>
+                                      <Text fw={700} size="sm">
+                                        {step.label}
+                                      </Text>
+                                    </Group>
+                                    <Group gap="xs" wrap="nowrap">
+                                      <Badge color="gray" variant="outline">
+                                        attempt {step.attempt}
+                                      </Badge>
+                                      <Badge
+                                        color={
+                                          step.status === "completed"
+                                            ? "teal"
+                                            : step.status === "running"
+                                              ? "blue"
+                                              : "red"
+                                        }
+                                        variant="light"
+                                      >
+                                        {step.status}
+                                      </Badge>
+                                    </Group>
+                                  </Group>
+                                </Accordion.Control>
+                                <Accordion.Panel>
+                                  <WorkflowStepDetails step={step} />
+                                </Accordion.Panel>
+                              </Accordion.Item>
+                            ))}
+                          </Accordion>
+                        ) : (
+                          <Text c="dimmed" size="sm">
+                            Start the workflow to inspect its step-by-step timeline.
+                          </Text>
+                        )}
+                      </Accordion.Panel>
+                    </Accordion.Item>
+                  </Accordion>
+                ) : null}
+              </Stack>
+            </Paper>
           </Stack>
         </Container>
       </AppShell.Main>

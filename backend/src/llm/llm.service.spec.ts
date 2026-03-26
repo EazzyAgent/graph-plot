@@ -152,6 +152,138 @@ describe('LlmService', () => {
     expect(toolRegistry.executeTool).not.toHaveBeenCalled();
   });
 
+  it('passes reasoning effort to OpenAI reasoning-capable models', async () => {
+    process.env.OPENAI_API_KEY = 'openai-key';
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        id: 'resp_reasoning',
+        output_text: 'Reasoned answer',
+        status: 'completed',
+        usage: {
+          input_tokens: 4,
+          output_tokens: 6,
+          total_tokens: 10,
+        },
+      }),
+    );
+
+    await service.chat({
+      provider: 'openai',
+      model: 'gpt-5.4',
+      messages: [{ role: 'user', content: 'Solve this.' }],
+      reasoningEffort: 'high',
+    });
+
+    const body = getJsonBody(fetchMock.mock.calls[0]?.[1]);
+    expect(body['reasoning']).toEqual({ effort: 'high' });
+  });
+
+  it('omits temperature for OpenAI models that reject it', async () => {
+    process.env.OPENAI_API_KEY = 'openai-key';
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        id: 'resp_openai_no_temp',
+        output_text: 'Draft code',
+        status: 'completed',
+        usage: {
+          input_tokens: 10,
+          output_tokens: 20,
+          total_tokens: 30,
+        },
+      }),
+    );
+
+    await service.chat({
+      provider: 'openai',
+      model: 'gpt-5-mini',
+      messages: [{ role: 'user', content: 'Write code.' }],
+      temperature: 0.2,
+    });
+
+    const body = getJsonBody(fetchMock.mock.calls[0]?.[1]);
+    expect(body['temperature']).toBeUndefined();
+  });
+
+  it('still passes temperature for OpenAI models that support it', async () => {
+    process.env.OPENAI_API_KEY = 'openai-key';
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        id: 'resp_openai_temp',
+        output_text: 'Answer',
+        status: 'completed',
+        usage: {
+          input_tokens: 4,
+          output_tokens: 6,
+          total_tokens: 10,
+        },
+      }),
+    );
+
+    await service.chat({
+      provider: 'openai',
+      model: 'gpt-4.1',
+      messages: [{ role: 'user', content: 'Hello' }],
+      temperature: 0.4,
+    });
+
+    const body = getJsonBody(fetchMock.mock.calls[0]?.[1]);
+    expect(body['temperature']).toBe(0.4);
+  });
+
+  it('passes structured output format to OpenAI when requested', async () => {
+    process.env.OPENAI_API_KEY = 'openai-key';
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        id: 'resp_structured',
+        output_text: '{"pythonCode":"print(1)"}',
+        status: 'completed',
+        usage: {
+          input_tokens: 10,
+          output_tokens: 12,
+          total_tokens: 22,
+        },
+      }),
+    );
+
+    await service.chat({
+      provider: 'openai',
+      model: 'gpt-5.4',
+      messages: [{ role: 'user', content: 'Return code.' }],
+      structuredOutput: {
+        name: 'draft_code_payload',
+        schema: {
+          type: 'object',
+          properties: {
+            pythonCode: {
+              type: 'string',
+            },
+          },
+          required: ['pythonCode'],
+          additionalProperties: false,
+        },
+      },
+    });
+
+    const body = getJsonBody(fetchMock.mock.calls[0]?.[1]);
+    expect(body['text']).toEqual({
+      format: {
+        type: 'json_schema',
+        name: 'draft_code_payload',
+        strict: true,
+        schema: {
+          type: 'object',
+          properties: {
+            pythonCode: {
+              type: 'string',
+            },
+          },
+          required: ['pythonCode'],
+          additionalProperties: false,
+        },
+      },
+    });
+  });
+
   it('calls Gemini with the selected model', async () => {
     process.env.GEMINI_API_KEY = 'gemini-key';
     fetchMock.mockResolvedValue(
@@ -197,6 +329,151 @@ describe('LlmService', () => {
     );
   });
 
+  it('passes thinking configuration to Gemini when reasoning effort is set', async () => {
+    process.env.GEMINI_API_KEY = 'gemini-key';
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        candidates: [
+          {
+            content: {
+              parts: [{ text: 'Reasoned Gemini answer' }],
+            },
+            finishReason: 'STOP',
+          },
+        ],
+        usageMetadata: {
+          promptTokenCount: 8,
+          candidatesTokenCount: 5,
+          totalTokenCount: 13,
+        },
+      }),
+    );
+
+    await service.chat({
+      provider: 'gemini',
+      model: 'gemini-3-flash-preview',
+      messages: [{ role: 'user', content: 'Think harder.' }],
+      reasoningEffort: 'high',
+    });
+
+    const body = getJsonBody(fetchMock.mock.calls[0]?.[1]);
+    expect(body['generationConfig']).toEqual(
+      expect.objectContaining({
+        thinkingConfig: {
+          thinkingLevel: 'HIGH',
+        },
+      }),
+    );
+  });
+
+  it('sends image inputs to OpenAI when a message includes images', async () => {
+    process.env.OPENAI_API_KEY = 'openai-key';
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        id: 'resp_img',
+        output_text: 'Image reviewed.',
+        status: 'completed',
+        usage: {
+          input_tokens: 10,
+          output_tokens: 3,
+          total_tokens: 13,
+        },
+      }),
+    );
+
+    await service.chat({
+      provider: 'openai',
+      model: 'gpt-5.4',
+      messages: [
+        {
+          role: 'user',
+          content: 'Critique this draft figure.',
+          images: [
+            {
+              mimeType: 'image/png',
+              base64Data: 'ZmFrZQ==',
+            },
+          ],
+        },
+      ],
+    });
+
+    const body = getJsonBody(fetchMock.mock.calls[0]?.[1]);
+
+    expect(body['input']).toEqual([
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'input_text',
+            text: 'Critique this draft figure.',
+          },
+          {
+            type: 'input_image',
+            image_url: 'data:image/png;base64,ZmFrZQ==',
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('sends image inputs to Gemini when a message includes images', async () => {
+    process.env.GEMINI_API_KEY = 'gemini-key';
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        candidates: [
+          {
+            content: {
+              parts: [{ text: 'Image reviewed.' }],
+            },
+            finishReason: 'STOP',
+          },
+        ],
+        usageMetadata: {
+          promptTokenCount: 10,
+          candidatesTokenCount: 3,
+          totalTokenCount: 13,
+        },
+      }),
+    );
+
+    await service.chat({
+      provider: 'gemini',
+      model: 'gemini-3-flash-preview',
+      messages: [
+        {
+          role: 'user',
+          content: 'Critique this draft figure.',
+          images: [
+            {
+              mimeType: 'image/png',
+              base64Data: 'ZmFrZQ==',
+            },
+          ],
+        },
+      ],
+    });
+
+    const body = getJsonBody(fetchMock.mock.calls[0]?.[1]);
+
+    expect(body['contents']).toEqual([
+      {
+        role: 'user',
+        parts: [
+          {
+            text: 'Critique this draft figure.',
+          },
+          {
+            inlineData: {
+              mimeType: 'image/png',
+              data: 'ZmFrZQ==',
+            },
+          },
+        ],
+      },
+    ]);
+  });
+
   it('normalizes the claude alias to anthropic', async () => {
     process.env.ANTHROPIC_API_KEY = 'anthropic-key';
     fetchMock.mockResolvedValue(
@@ -229,6 +506,88 @@ describe('LlmService', () => {
         totalTokens: 17,
       },
     });
+  });
+
+  it('passes thinking configuration to Anthropic when reasoning effort is set', async () => {
+    process.env.ANTHROPIC_API_KEY = 'anthropic-key';
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        id: 'msg_reasoning',
+        content: [{ type: 'text', text: 'Reasoned Claude answer' }],
+        stop_reason: 'end_turn',
+        usage: {
+          input_tokens: 12,
+          output_tokens: 5,
+        },
+      }),
+    );
+
+    await service.chat({
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-6',
+      messages: [{ role: 'user', content: 'Review this carefully.' }],
+      reasoningEffort: 'medium',
+    });
+
+    const body = getJsonBody(fetchMock.mock.calls[0]?.[1]);
+    expect(body['thinking']).toEqual({
+      type: 'adaptive',
+      effort: 'medium',
+    });
+  });
+
+  it('sends image inputs to Anthropic when a message includes images', async () => {
+    process.env.ANTHROPIC_API_KEY = 'anthropic-key';
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        id: 'msg_img',
+        content: [{ type: 'text', text: 'Image reviewed.' }],
+        stop_reason: 'end_turn',
+        usage: {
+          input_tokens: 12,
+          output_tokens: 4,
+        },
+      }),
+    );
+
+    await service.chat({
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-6',
+      messages: [
+        {
+          role: 'user',
+          content: 'Critique this draft figure.',
+          images: [
+            {
+              mimeType: 'image/png',
+              base64Data: 'ZmFrZQ==',
+            },
+          ],
+        },
+      ],
+    });
+
+    const body = getJsonBody(fetchMock.mock.calls[0]?.[1]);
+
+    expect(body['messages']).toEqual([
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: 'Critique this draft figure.',
+          },
+          {
+            type: 'image',
+            source: {
+              type: 'base64',
+              media_type: 'image/png',
+              data: 'ZmFrZQ==',
+            },
+          },
+        ],
+      },
+    ]);
   });
 
   it('executes OpenAI filesystem tools across multiple rounds', async () => {
@@ -400,9 +759,11 @@ describe('LlmService', () => {
         expect.objectContaining({ type: 'function', name: 'inspect_path' }),
       ]),
     );
+    expect(firstBody['store']).toBe(true);
     expect(firstBody['instructions']).toEqual(
       expect.stringContaining("Infer lineCount from the user's request"),
     );
+    expect(secondBody['previous_response_id']).toBe('resp_1');
     expect(secondBody['input']).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -411,6 +772,8 @@ describe('LlmService', () => {
         }),
       ]),
     );
+    expect(secondBody['input']).toHaveLength(1);
+    expect(thirdBody['previous_response_id']).toBe('resp_2');
     expect(thirdBody['input']).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -419,6 +782,7 @@ describe('LlmService', () => {
         }),
       ]),
     );
+    expect(thirdBody['input']).toHaveLength(1);
   });
 
   it('executes Gemini filesystem tools and returns final text', async () => {
@@ -766,6 +1130,17 @@ describe('LlmService', () => {
         model: 'gpt-5.4',
         messages: [{ role: 'user', content: 'Hello' }],
         tools: { fileSystem: 'yes' as never },
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects invalid reasoningEffort values', async () => {
+    await expect(
+      service.chat({
+        provider: 'openai',
+        model: 'gpt-5.4',
+        messages: [{ role: 'user', content: 'Hello' }],
+        reasoningEffort: 'extreme' as never,
       }),
     ).rejects.toBeInstanceOf(BadRequestException);
   });

@@ -6,6 +6,7 @@ import { configureApp } from './../src/app/app.config';
 import { AppModule } from './../src/app/app.module';
 import type {
   ExecCapabilitiesResponse,
+  ExecPlotCapabilitiesResponse,
   ExecRunResponse,
 } from './../src/exec/exec.types';
 import type { LlmProviderInfo } from './../src/llm/llm.types';
@@ -125,6 +126,20 @@ describe('AppController (e2e)', () => {
         expect(body.stdout).toContain('exec ok');
         expect(body.requestedRuntime).toBe('shell');
         expect(Array.isArray(body.logs)).toBe(true);
+      });
+  });
+
+  it('/api/exec/plot/capabilities (GET)', () => {
+    return request(app.getHttpServer())
+      .get('/api/exec/plot/capabilities')
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as ExecPlotCapabilitiesResponse;
+
+        expect(body.os).toBe(process.platform);
+        expect(typeof body.sandbox.available).toBe('boolean');
+        expect(typeof body.sandbox.bootstrapped).toBe('boolean');
+        expect(Array.isArray(body.sandbox.requiredPackages)).toBe(true);
       });
   });
 });

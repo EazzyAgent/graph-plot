@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Post } from '@nestjs/common';
 import { ExecService } from './exec.service';
-import type { ExecRunRequestBody } from './exec.types';
+import type { ExecPlotRequestBody, ExecRunRequestBody } from './exec.types';
 
 @Controller('exec')
 export class ExecController {
@@ -11,8 +11,18 @@ export class ExecController {
     return this.execService.getCapabilities();
   }
 
+  @Get('plot/capabilities')
+  getPlotCapabilities() {
+    return this.execService.getPlotCapabilities();
+  }
+
   @Post('run')
   run(@Body() requestBody: ExecRunRequestBody) {
     return this.execService.run(requestBody);
+  }
+
+  @Post('plot')
+  runPlot(@Body() requestBody: ExecPlotRequestBody) {
+    return this.execService.runPlot(requestBody);
   }
 }

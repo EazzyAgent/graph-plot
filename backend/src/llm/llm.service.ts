@@ -8,14 +8,18 @@ import { ToolRegistryService } from './tools/tool-registry.service';
 import type { LlmToolExecutionResult } from './tools/tool.types';
 import type {
   CanonicalLlmProvider,
+  LlmChatImageInput,
   LlmChatMessage,
   LlmChatRequestBody,
+  LlmStructuredOutputSchema,
+  LlmReasoningEffort,
   LlmChatResponse,
   LlmProviderInfo,
   LlmToolTraceEntry,
   NormalizedLlmChatRequest,
   NormalizedLlmChatToolOptions,
 } from './llm.types';
+import { LLM_REASONING_EFFORTS } from './llm.types';
 
 type JsonObject = Record<string, unknown>;
 
@@ -43,6 +47,11 @@ interface AnthropicToolCall {
   id: string;
   input: unknown;
   name: string;
+}
+
+interface OpenAiRequestOptions {
+  previousResponseId?: string;
+  store?: boolean;
 }
 
 interface ResolvedOpenAiToolCall {
@@ -166,10 +175,7 @@ export class LlmService {
     );
     const conversationMessages = request.messages
       .filter((message) => message.role !== 'system')
-      .map((message) => ({
-        role: message.role,
-        content: message.content,
-      }));
+      .map((message) => this.toOpenAiMessageInput(message));
 
     const data = await this.postOpenAiRequest(
       request,
@@ -187,14 +193,12 @@ export class LlmService {
       getCombinedMessageText(request.messages, 'system'),
       FILE_SYSTEM_TOOL_GUIDANCE,
     );
-    const input: JsonObject[] = request.messages
+    let input: JsonObject[] = request.messages
       .filter((message) => message.role !== 'system')
-      .map((message) => ({
-        role: message.role,
-        content: message.content,
-      }));
+      .map((message) => this.toOpenAiMessageInput(message));
     const tools = this.getOpenAiToolDefinitions();
     const toolTrace: LlmToolTraceEntry[] = [];
+    let previousResponseId: string | undefined;
 
     for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
       const data = await this.postOpenAiRequest(
@@ -202,6 +206,10 @@ export class LlmService {
         input,
         systemInstructions,
         tools,
+        {
+          store: true,
+          previousResponseId,
+        },
       );
       const toolCalls = this.extractOpenAiToolCalls(data);
 
@@ -215,9 +223,14 @@ export class LlmService {
         );
       }
 
-      input.push(
-        ...getArrayValue(data, 'output').map((item) => getObject(item)),
-      );
+      previousResponseId = getStringValue(data, 'id');
+      if (!previousResponseId) {
+        throw new BadGatewayException(
+          'OpenAI did not return a response id for a stored tool response.',
+        );
+      }
+
+      input = [];
 
       for (const toolCall of toolCalls) {
         const resolvedToolCall = await this.resolveOpenAiToolCall(toolCall);
@@ -260,7 +273,7 @@ export class LlmService {
     );
     const contents = request.messages
       .filter((message) => message.role !== 'system')
-      .map((message) => this.toGeminiTextMessage(message));
+      .map((message) => this.toGeminiMessage(message));
 
     const data = await this.postGeminiRequest(
       request,
@@ -280,7 +293,7 @@ export class LlmService {
     );
     const contents: JsonObject[] = request.messages
       .filter((message) => message.role !== 'system')
-      .map((message) => this.toGeminiTextMessage(message));
+      .map((message) => this.toGeminiMessage(message));
     const tools = this.getGeminiToolDefinitions();
     const toolTrace: LlmToolTraceEntry[] = [];
 
@@ -363,10 +376,7 @@ export class LlmService {
     const systemPrompt = getCombinedMessageText(request.messages, 'system');
     const messages = request.messages
       .filter((message) => message.role !== 'system')
-      .map((message) => ({
-        role: message.role,
-        content: message.content,
-      }));
+      .map((message) => this.toAnthropicMessage(message));
 
     const data = await this.postAnthropicRequest(
       request,
@@ -386,10 +396,7 @@ export class LlmService {
     );
     const messages: JsonObject[] = request.messages
       .filter((message) => message.role !== 'system')
-      .map((message) => ({
-        role: message.role,
-        content: message.content,
-      }));
+      .map((message) => this.toAnthropicMessage(message));
     const tools = this.getAnthropicToolDefinitions();
     const toolTrace: LlmToolTraceEntry[] = [];
 
@@ -523,13 +530,18 @@ export class LlmService {
     input: JsonObject[],
     systemInstructions?: string,
     tools?: JsonObject[],
+    options?: OpenAiRequestOptions,
   ): Promise<JsonObject> {
     const apiKey = this.getRequiredApiKey('openai');
     const payload: JsonObject = {
       model: request.model,
-      store: false,
+      store: options?.store ?? false,
       input,
     };
+
+    if (options?.previousResponseId) {
+      payload.previous_response_id = options.previousResponseId;
+    }
 
     if (systemInstructions) {
       payload.instructions = systemInstructions;
@@ -539,8 +551,26 @@ export class LlmService {
       payload.max_output_tokens = request.maxTokens;
     }
 
-    if (typeof request.temperature === 'number') {
+    if (
+      typeof request.temperature === 'number' &&
+      supportsOpenAiTemperature(request.model)
+    ) {
       payload.temperature = request.temperature;
+    }
+
+    if (request.structuredOutput) {
+      payload.text = {
+        format: buildOpenAiStructuredOutputFormat(request.structuredOutput),
+      };
+    }
+
+    const reasoning = getOpenAiReasoningConfig(
+      request.model,
+      request.reasoningEffort,
+    );
+
+    if (reasoning) {
+      payload.reasoning = reasoning;
     }
 
     if (tools) {
@@ -585,6 +615,15 @@ export class LlmService {
       generationConfig.temperature = request.temperature;
     }
 
+    const thinkingConfig = getGeminiThinkingConfig(
+      request.model,
+      request.reasoningEffort,
+    );
+
+    if (thinkingConfig) {
+      generationConfig.thinkingConfig = thinkingConfig;
+    }
+
     if (Object.keys(generationConfig).length > 0) {
       payload.generationConfig = generationConfig;
     }
@@ -621,9 +660,14 @@ export class LlmService {
     tools?: JsonObject[],
   ): Promise<JsonObject> {
     const apiKey = this.getRequiredApiKey('anthropic');
+    const anthropicThinking = getAnthropicThinkingConfig(
+      request.model,
+      request.reasoningEffort,
+      request.maxTokens,
+    );
     const payload: JsonObject = {
       model: request.model,
-      max_tokens: request.maxTokens ?? 1024,
+      max_tokens: anthropicThinking.maxTokens,
       messages,
     };
 
@@ -633,6 +677,10 @@ export class LlmService {
 
     if (typeof request.temperature === 'number') {
       payload.temperature = request.temperature;
+    }
+
+    if (anthropicThinking.thinking) {
+      payload.thinking = anthropicThinking.thinking;
     }
 
     if (tools) {
@@ -728,10 +776,91 @@ export class LlmService {
     };
   }
 
-  private toGeminiTextMessage(message: LlmChatMessage): JsonObject {
+  private toOpenAiMessageInput(message: LlmChatMessage): JsonObject {
+    if (!message.images || message.images.length === 0) {
+      return {
+        role: message.role,
+        content: message.content,
+      };
+    }
+
+    const contentParts: JsonObject[] = [];
+
+    if (message.content.length > 0) {
+      contentParts.push({
+        type: 'input_text',
+        text: message.content,
+      });
+    }
+
+    contentParts.push(
+      ...message.images.map((image) => ({
+        type: 'input_image',
+        image_url: toDataUrl(image),
+      })),
+    );
+
+    return {
+      role: message.role,
+      content: contentParts,
+    };
+  }
+
+  private toGeminiMessage(message: LlmChatMessage): JsonObject {
+    const parts: JsonObject[] = [];
+
+    if (message.content.length > 0) {
+      parts.push({ text: message.content });
+    }
+
+    if (message.images) {
+      parts.push(
+        ...message.images.map((image) => ({
+          inlineData: {
+            mimeType: image.mimeType,
+            data: image.base64Data,
+          },
+        })),
+      );
+    }
+
     return {
       role: message.role === 'assistant' ? 'model' : 'user',
-      parts: [{ text: message.content }],
+      parts,
+    };
+  }
+
+  private toAnthropicMessage(message: LlmChatMessage): JsonObject {
+    if (!message.images || message.images.length === 0) {
+      return {
+        role: message.role,
+        content: message.content,
+      };
+    }
+
+    const content: JsonObject[] = [];
+
+    if (message.content.length > 0) {
+      content.push({
+        type: 'text',
+        text: message.content,
+      });
+    }
+
+    content.push(
+      ...message.images.map((image) => ({
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: image.mimeType,
+          data: image.base64Data,
+        },
+      })),
+    );
+
+    return {
+      role: message.role,
+      content,
     };
   }
 
@@ -910,7 +1039,13 @@ function normalizeChatRequest(
     requestBody.temperature,
     'temperature',
   );
+  const reasoningEffort = normalizeOptionalReasoningEffort(
+    requestBody.reasoningEffort,
+  );
   const tools = normalizeToolOptions(requestBody.tools);
+  const structuredOutput = normalizeStructuredOutput(
+    requestBody.structuredOutput,
+  );
 
   return {
     provider,
@@ -918,7 +1053,9 @@ function normalizeChatRequest(
     messages,
     maxTokens,
     temperature,
+    reasoningEffort,
     tools,
+    ...(structuredOutput ? { structuredOutput } : {}),
   };
 }
 
@@ -946,7 +1083,8 @@ function normalizeMessage(message: unknown): LlmChatMessage {
   }
 
   const role = getStringValue(message, 'role')?.trim().toLowerCase();
-  const content = getStringValue(message, 'content')?.trim();
+  const content = getStringValue(message, 'content')?.trim() ?? '';
+  const images = normalizeImages(message['images']);
 
   if (!role || !['system', 'user', 'assistant'].includes(role)) {
     throw new BadRequestException(
@@ -954,16 +1092,55 @@ function normalizeMessage(message: unknown): LlmChatMessage {
     );
   }
 
-  if (!content) {
+  if (!content && images.length === 0) {
     throw new BadRequestException(
-      '`messages[].content` must be a non-empty string.',
+      '`messages[].content` must be a non-empty string unless images are provided.',
     );
   }
 
   return {
     role: role as LlmChatMessage['role'],
     content,
+    ...(images.length > 0 ? { images } : {}),
   };
+}
+
+function normalizeImages(value: unknown): LlmChatImageInput[] {
+  if (typeof value === 'undefined') {
+    return [];
+  }
+
+  if (!Array.isArray(value)) {
+    throw new BadRequestException('`messages[].images` must be an array.');
+  }
+
+  return value.map((image, index) => {
+    if (!isObject(image)) {
+      throw new BadRequestException(
+        `\`messages[].images[${index}]\` must be a JSON object.`,
+      );
+    }
+
+    const mimeType = getStringValue(image, 'mimeType')?.trim();
+    const base64Data = getStringValue(image, 'base64Data')?.trim();
+
+    if (!mimeType || !mimeType.startsWith('image/')) {
+      throw new BadRequestException(
+        `\`messages[].images[${index}].mimeType\` must be an image MIME type.`,
+      );
+    }
+
+    if (!base64Data) {
+      throw new BadRequestException(
+        `\`messages[].images[${index}].base64Data\` must be a non-empty base64 string.`,
+      );
+    }
+
+    return {
+      mimeType,
+      base64Data,
+    };
+  });
 }
 
 function normalizeToolOptions(tools: unknown): NormalizedLlmChatToolOptions {
@@ -988,6 +1165,55 @@ function normalizeToolOptions(tools: unknown): NormalizedLlmChatToolOptions {
   }
 
   return { fileSystem };
+}
+
+function normalizeStructuredOutput(
+  value: unknown,
+): LlmStructuredOutputSchema | undefined {
+  if (typeof value === 'undefined') {
+    return undefined;
+  }
+
+  if (!isObject(value)) {
+    throw new BadRequestException(
+      '`structuredOutput` must be a JSON object when provided.',
+    );
+  }
+
+  const name = requireNonEmptyString(
+    value.name,
+    '`structuredOutput.name` must be a non-empty string.',
+  );
+  const schema = value.schema;
+
+  if (!isObject(schema)) {
+    throw new BadRequestException(
+      '`structuredOutput.schema` must be a JSON object.',
+    );
+  }
+
+  if (
+    typeof value.strict !== 'undefined' &&
+    typeof value.strict !== 'boolean'
+  ) {
+    throw new BadRequestException(
+      '`structuredOutput.strict` must be a boolean when provided.',
+    );
+  }
+
+  return {
+    name,
+    schema,
+    strict: value.strict === false ? false : true,
+  };
+}
+
+function requireNonEmptyString(value: unknown, errorMessage: string): string {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new BadRequestException(errorMessage);
+  }
+
+  return value.trim();
 }
 
 function normalizeOptionalPositiveInteger(
@@ -1020,6 +1246,34 @@ function normalizeOptionalNumber(
   }
 
   return value;
+}
+
+function normalizeOptionalReasoningEffort(
+  value: unknown,
+): LlmReasoningEffort | undefined {
+  if (typeof value === 'undefined') {
+    return undefined;
+  }
+
+  if (typeof value !== 'string') {
+    throw new BadRequestException(
+      '`reasoningEffort` must be one of: none, low, medium, high.',
+    );
+  }
+
+  const normalized = value.trim().toLowerCase();
+
+  if (
+    !LLM_REASONING_EFFORTS.includes(
+      normalized as (typeof LLM_REASONING_EFFORTS)[number],
+    )
+  ) {
+    throw new BadRequestException(
+      '`reasoningEffort` must be one of: none, low, medium, high.',
+    );
+  }
+
+  return normalized as LlmReasoningEffort;
 }
 
 function getCombinedMessageText(
@@ -1094,8 +1348,173 @@ function buildToolResultPayload(result: LlmToolExecutionResult): JsonObject {
   };
 }
 
+function toDataUrl(image: LlmChatImageInput): string {
+  return `data:${image.mimeType};base64,${image.base64Data}`;
+}
+
 function stringifyToolResult(result: LlmToolExecutionResult): string {
   return JSON.stringify(buildToolResultPayload(result));
+}
+
+function getOpenAiReasoningConfig(
+  model: string,
+  reasoningEffort: LlmReasoningEffort | undefined,
+): JsonObject | undefined {
+  if (
+    !reasoningEffort ||
+    reasoningEffort === 'none' ||
+    !supportsOpenAiReasoning(model)
+  ) {
+    return undefined;
+  }
+
+  return {
+    effort: reasoningEffort,
+  };
+}
+
+function supportsOpenAiReasoning(model: string): boolean {
+  const normalized = model.trim().toLowerCase();
+
+  return (
+    normalized.startsWith('gpt-5') ||
+    normalized.startsWith('o1') ||
+    normalized.startsWith('o3') ||
+    normalized.startsWith('o4')
+  );
+}
+
+function supportsOpenAiTemperature(model: string): boolean {
+  const normalized = model.trim().toLowerCase();
+
+  return !(
+    normalized.startsWith('gpt-5') ||
+    normalized.startsWith('o1') ||
+    normalized.startsWith('o3') ||
+    normalized.startsWith('o4')
+  );
+}
+
+function buildOpenAiStructuredOutputFormat(
+  structuredOutput: LlmStructuredOutputSchema,
+): JsonObject {
+  return {
+    type: 'json_schema',
+    name: structuredOutput.name,
+    strict: structuredOutput.strict !== false,
+    schema: structuredOutput.schema,
+  };
+}
+
+function getGeminiThinkingConfig(
+  model: string,
+  reasoningEffort: LlmReasoningEffort | undefined,
+): JsonObject | undefined {
+  if (!reasoningEffort) {
+    return undefined;
+  }
+
+  if (isGemini3Model(model)) {
+    return {
+      thinkingLevel: mapGemini3ThinkingLevel(reasoningEffort),
+    };
+  }
+
+  return {
+    thinkingBudget: mapGeminiThinkingBudget(model, reasoningEffort),
+  };
+}
+
+function isGemini3Model(model: string): boolean {
+  return model.trim().toLowerCase().startsWith('gemini-3');
+}
+
+function mapGemini3ThinkingLevel(reasoningEffort: LlmReasoningEffort): string {
+  switch (reasoningEffort) {
+    case 'none':
+      return 'MINIMAL';
+    case 'low':
+      return 'LOW';
+    case 'medium':
+      return 'MEDIUM';
+    case 'high':
+      return 'HIGH';
+  }
+}
+
+function mapGeminiThinkingBudget(
+  model: string,
+  reasoningEffort: LlmReasoningEffort,
+): number {
+  const normalized = model.trim().toLowerCase();
+  const isProModel = normalized.includes('pro');
+
+  switch (reasoningEffort) {
+    case 'none':
+      return isProModel ? 128 : 0;
+    case 'low':
+      return isProModel ? 2_048 : 1_024;
+    case 'medium':
+      return isProModel ? 8_192 : 4_096;
+    case 'high':
+      return isProModel ? 24_576 : 16_384;
+  }
+}
+
+function getAnthropicThinkingConfig(
+  model: string,
+  reasoningEffort: LlmReasoningEffort | undefined,
+  maxTokens: number | undefined,
+): { maxTokens: number; thinking?: JsonObject } {
+  if (!reasoningEffort || reasoningEffort === 'none') {
+    return {
+      maxTokens: maxTokens ?? 1_024,
+    };
+  }
+
+  if (supportsAnthropicAdaptiveThinking(model)) {
+    return {
+      maxTokens: maxTokens ?? 1_024,
+      thinking: {
+        type: 'adaptive',
+        effort: reasoningEffort,
+      },
+    };
+  }
+
+  const budgetTokens = mapAnthropicThinkingBudget(reasoningEffort);
+  const resolvedMaxTokens = Math.max(
+    maxTokens ?? budgetTokens + 1_024,
+    budgetTokens + 1,
+  );
+
+  return {
+    maxTokens: resolvedMaxTokens,
+    thinking: {
+      type: 'enabled',
+      budget_tokens: Math.min(budgetTokens, resolvedMaxTokens - 1),
+    },
+  };
+}
+
+function supportsAnthropicAdaptiveThinking(model: string): boolean {
+  const normalized = model.trim().toLowerCase();
+  return normalized.includes('4-6');
+}
+
+function mapAnthropicThinkingBudget(
+  reasoningEffort: LlmReasoningEffort,
+): number {
+  switch (reasoningEffort) {
+    case 'none':
+      return 0;
+    case 'low':
+      return 1_024;
+    case 'medium':
+      return 4_096;
+    case 'high':
+      return 8_192;
+  }
 }
 
 function safeJsonParse(

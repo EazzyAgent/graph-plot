@@ -1,7 +1,12 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ExecController } from './exec.controller';
 import { ExecService } from './exec.service';
-import type { ExecCapabilitiesResponse, ExecRunResponse } from './exec.types';
+import type {
+  ExecCapabilitiesResponse,
+  ExecPlotCapabilitiesResponse,
+  ExecPlotResponse,
+  ExecRunResponse,
+} from './exec.types';
 
 describe('ExecController', () => {
   let controller: ExecController;
@@ -40,9 +45,41 @@ describe('ExecController', () => {
     errors: [],
   };
 
+  const plotCapabilitiesResponse: ExecPlotCapabilitiesResponse = {
+    os: process.platform,
+    sandbox: {
+      available: true,
+      bootstrapped: true,
+      command: 'python',
+      packageDirectory: 'C:\\tmp\\python-plot-packages',
+      requiredPackages: ['matplotlib', 'numpy', 'pandas', 'seaborn'],
+    },
+  };
+
+  const plotResponse: ExecPlotResponse = {
+    ...runResponse,
+    requestedRuntime: 'python',
+    resolvedRuntime: 'python',
+    renderProfile: 'draft',
+    sandbox: plotCapabilitiesResponse.sandbox,
+    artifacts: [
+      {
+        kind: 'image',
+        filename: 'figure-1.png',
+        mimeType: 'image/png',
+        base64: 'ZmFrZQ==',
+        byteSize: 4,
+      },
+    ],
+  };
+
   const execService = {
     getCapabilities: jest.fn(() => Promise.resolve(capabilitiesResponse)),
+    getPlotCapabilities: jest.fn(() =>
+      Promise.resolve(plotCapabilitiesResponse),
+    ),
     run: jest.fn(() => Promise.resolve(runResponse)),
+    runPlot: jest.fn(() => Promise.resolve(plotResponse)),
   };
 
   beforeEach(async () => {
@@ -76,5 +113,19 @@ describe('ExecController', () => {
         code: 'echo test',
       }),
     ).resolves.toEqual(runResponse);
+  });
+
+  it('returns plotting sandbox capabilities', async () => {
+    await expect(controller.getPlotCapabilities()).resolves.toEqual(
+      plotCapabilitiesResponse,
+    );
+  });
+
+  it('delegates plot requests to the service', async () => {
+    await expect(
+      controller.runPlot({
+        code: 'plt.plot([1, 2, 3])',
+      }),
+    ).resolves.toEqual(plotResponse);
   });
 });
